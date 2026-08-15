@@ -87,6 +87,13 @@ class BlblDanmakuController(
     private var playWhenReady = false
 
     /**
+     * 播放器的真实播放倍速。DanmakuTimer 用它把单调时钟推进到媒体时间；
+     * 若固定为 1x，倍速播放时 raw position 会持续领先并触发周期性追赶跳跃。
+     */
+    @Volatile
+    private var currentPlaybackSpeed = 1f
+
+    /**
      * 数据预处理协程作用域：把排序/过滤/合并/转换丢到后台线程，避免阻塞主线程。
      * 参考 MyPlayerDanmakuController.controllerScope 的模式。
      */
@@ -123,7 +130,7 @@ class BlblDanmakuController(
         view.setPositionProvider { playerPositionProvider?.invoke()?.coerceAtLeast(0L) ?: 0L }
         view.setIsPlayingProvider { isPlaying }
         view.setPlayWhenReadyProvider { playWhenReady }
-        view.setPlaybackSpeedProvider { 1f } // 引擎内部按播放速度算 duration，这里固定 1
+        view.setPlaybackSpeedProvider { currentPlaybackSpeed }
         view.setConfigProvider { currentConfig }
     }
 
@@ -300,8 +307,13 @@ class BlblDanmakuController(
         }
     }
 
-    override fun updatePlaybackSpeed(@Suppress("UNUSED_PARAMETER") speed: Float) {
-        // blbl 引擎按 durationMs 推进，播放速度由 positionProvider 推进速率体现，无需额外处理
+    override fun updatePlaybackSpeed(speed: Float) {
+        val resolved = speed.takeIf { it.isFinite() && it > 0f } ?: 1f
+        if (currentPlaybackSpeed == resolved) return
+        currentPlaybackSpeed = resolved
+        // 稀疏时间线可能正处于 idle；主动请求一帧，让 timer 立即观察到倍速变化，
+        // 同时刷新 idle wake 使用的 latestPlaybackSpeed。
+        viewProvider()?.postInvalidateOnAnimation()
     }
 
     override fun notifyPlaybackStateChanged(@Suppress("UNUSED_PARAMETER") playbackState: Int, playWhenReady: Boolean) {

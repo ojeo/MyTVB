@@ -2758,6 +2758,11 @@ class MyPlayerView @JvmOverloads constructor(
         } else {
             dmkView = ensureFunctionalDanmakuView()
         }
+        // 默认播放倍速可能先于性能引擎创建完成设置；切换后必须补发当前值，
+        // 否则新控制器会一直以 1x 推进弹幕时钟，直到下一次用户手动切速。
+        activeDanmakuController()?.updatePlaybackSpeed(
+            player?.playbackParameters?.speed ?: 1f
+        )
         applyDanmakuLayerVisibility(lite)
         restoreOverlayZOrder()
     }
