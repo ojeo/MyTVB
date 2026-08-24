@@ -63,6 +63,9 @@ class DanmakuView @JvmOverloads constructor(
                     return
                 }
                 try {
+                    // 日志关闭：本轮直接跳过（provider 读取也不做），
+                    // 走 finally 继续维持调度，运行中重新开启日志后下一轮生效。
+                    if (!AppLog.isEnabled) return
                     val cfg = runCatching { configProvider?.invoke() }.getOrNull()
                     val rawPos = runCatching { positionProvider?.invoke() }.getOrNull() ?: lastRawPositionMs
                     val isPlaying = runCatching { isPlayingProvider?.invoke() }.getOrNull() ?: false
@@ -211,14 +214,28 @@ class DanmakuView @JvmOverloads constructor(
         invalidate()
     }
 
+    /** 漂移监督器（控制器侧三段式对表）使用的时钟治理入口，转发给内部 player。 */
+    fun updateDanmakuTimeFactor(factor: Float) {
+        player.updateTimeFactor(factor)
+    }
+
+    fun currentDanmakuPositionMs(): Long = player.currentDanmakuPositionMs()
+
+    fun syncDanmakuTimerTo(positionMs: Long) {
+        player.syncTimerTo(positionMs)
+    }
+
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        AppLog.i(DIAG_TAG, "view ATTACH ${width}x${height}")
         updateViewportIfNeeded()
         startPerfLoggingIfNeeded()
     }
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
+        // detach 后引擎被永久 release；若之后同实例重新 attach 而弹幕不再显示，此日志即为现场。
+        AppLog.w(DIAG_TAG, "view DETACH ${width}x${height} → player.release() (irreversible)")
         stopPerfLogging()
         player.release()
         debugStats.reset()
@@ -304,6 +321,8 @@ class DanmakuView @JvmOverloads constructor(
     }
 
     private fun startPerfLoggingIfNeeded() {
+        // 周期任务常驻（保证运行中开启日志能生效），重活由 logPerfIfNeeded 的
+        // isEnabled 早退挡住：关闭时每 3s 只剩几个 provider 调用，零字符串构建。
         if (perfLogPosted) return
         perfLogPosted = true
         perfLastLogAtUptimeMs = 0L
@@ -328,6 +347,8 @@ class DanmakuView @JvmOverloads constructor(
         playbackSpeed: Float = 1f,
         force: Boolean = false,
     ) {
+        // 日志关闭时零成本跳过（不打快照、不拼字符串、不触发采样请求）。
+        if (!AppLog.isEnabled) return
         val now = SystemClock.uptimeMillis()
         val lastAt = perfLastLogAtUptimeMs
         val due = lastAt == 0L || now - lastAt >= PERF_LOG_INTERVAL_MS
@@ -543,6 +564,8 @@ class DanmakuView @JvmOverloads constructor(
     }
 
     private companion object {
+        private const val DIAG_TAG = "BlblDmDiag"
+
         private const val STOP_WHEN_IDLE_MS = 700L
         private const val PERF_LOG_INTERVAL_MS = 3_000L
     }

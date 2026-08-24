@@ -439,6 +439,11 @@ class MyPlayerView @JvmOverloads constructor(
                 // seek 后 video 解码追上前不渲染 mask，避免 200ms 错位窗口。
                 dmMaskController.onSeek()
                 armSeekDiag(oldPosition.positionMs, newPosition.positionMs)
+                // 位置不连续必须转发弹幕层（含播放器内部 SEEK_ADJUSTMENT 前跳，不只是用户 seek）：
+                // 不通知时弹幕平滑时钟与媒体钟错开，恢复播放瞬间在屏弹幕 elapsed 虚增
+                // → 提前退场（半路消失）或整屏位置跳变。用户主动 seek 路径会再次转发，
+                // 引擎侧重建幂等（同位置重建跳过在屏条目），兼容引擎有 300ms 去重。
+                syncDanmakuPosition(newPosition.positionMs, forceSeek = true)
             }
         }
 
@@ -909,6 +914,8 @@ class MyPlayerView @JvmOverloads constructor(
         surfaceH: Int,
         hostRect: Rect
     ) {
+        // 每帧都会被 computeMaskVideoBounds 调到：日志关闭时连 key 字符串都不构建。
+        if (!AppLog.isEnabled) return
         val now = SystemClock.elapsedRealtime()
         val key = "${maskVideoWidth}x$maskVideoHeight@$maskVideoPixelRatio/" +
             "$maskVideoRotationDegrees/$maskResizeMode/$surfaceW:$surfaceH/" +
@@ -2133,8 +2140,11 @@ class MyPlayerView @JvmOverloads constructor(
         }
         settingView?.showHide(show)
         if (!show) {
-            val currentPositionMs = player?.currentPosition?.coerceAtLeast(0L) ?: 0L
-            syncDanmakuPosition(currentPositionMs, forceSeek = true)
+            // 关闭设置面板不是 seek：此处没有 player.seekTo()，不能按 forceSeek 通知引擎重建场景。
+            // 此前用 player.currentPosition 强制 forceSeek，与弹幕平滑位置的几十毫秒固有偏差
+            // 会被引擎误判为"位置回退"→ 清空防重放历史 → 最近一个滚动窗口的弹幕整体重放
+            // （用户视角："弹幕滚完又出现一遍"）。设置变更由 updateConfig 路径自行处理，
+            // 位置同步由 positionProvider 自动跟随，这里无需任何弹幕同步。
             restoreControllerAfterGesture(showIndefinitely = true)
         }
     }

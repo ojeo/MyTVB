@@ -22,8 +22,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.abs
 
 /**
  * blbl 弹幕引擎适配控制器（性能优先模式）。
@@ -59,6 +61,18 @@ class BlblDanmakuController(
         private const val LIVE_HISTORY_MAX_ITEMS = 2_000
         private const val LIVE_EMIT_BATCH_MS = 50L
         private const val TAIL_PATCH_MERGE_WINDOW_MS = 2_000
+
+        // ---- 漂移监督器（三段式对表，阈值对齐兼容引擎 MyPlayerDanmakuController）----
+        /** 对表周期：电视端 1.5s，软同步收敛速率 ≈ 33ms/s（5% × 1.5s 拍间隔内持续生效）。 */
+        private const val DRIFT_SYNC_INTERVAL_MS = 1_500L
+        /** 死区：偏差在此以内完全忽略，弹幕按原速走。 */
+        private const val DRIFT_NEUTRAL_TOLERANCE_MS = 250L
+        /** 硬阈值：超过才考虑硬校准（DanmakuTimer 自身的 2s 硬重锚作为最后保险）。 */
+        private const val DRIFT_HARD_SYNC_THRESHOLD_MS = 2_000L
+        /** 软同步修正幅度。 */
+        private const val DRIFT_SOFT_CORRECTION = 0.05f
+        /** 硬校准去抖：连续 N 拍超阈值才执行，排除卡顿期偶发偏差。 */
+        private const val DRIFT_HARD_SYNC_DEBOUNCE = 3
     }
 
     /** 屏幕密度，用于对齐 AkDanmaku 字号公式。 */
@@ -86,12 +100,15 @@ class BlblDanmakuController(
     @Volatile
     private var playWhenReady = false
 
-    /**
-     * 播放器的真实播放倍速。DanmakuTimer 用它把单调时钟推进到媒体时间；
-     * 若固定为 1x，倍速播放时 raw position 会持续领先并触发周期性追赶跳跃。
-     */
+    // 真实播放倍速（updatePlaybackSpeed 落地，timer 积分与漂移对表共用）。
     @Volatile
-    private var currentPlaybackSpeed = 1f
+    private var currentPlaybackSpeed: Float = 1f
+
+    // ---- 漂移监督器：三段式对表（对齐兼容引擎 MyPlayerDanmakuController 的线上策略）----
+    // 平滑时钟独立积分后与视频位置的偏差必须被持续治理，否则积累到 DanmakuTimer 的
+    // 2s 硬重锚阈值时一步回拉，在屏弹幕位置倒跳重滚（"同一条弹幕再滚一遍"）。
+    private var driftSyncJob: Job? = null
+    private var consecutiveHardSyncCount = 0
 
     /**
      * 数据预处理协程作用域：把排序/过滤/合并/转换丢到后台线程，避免阻塞主线程。
@@ -130,6 +147,8 @@ class BlblDanmakuController(
         view.setPositionProvider { playerPositionProvider?.invoke()?.coerceAtLeast(0L) ?: 0L }
         view.setIsPlayingProvider { isPlaying }
         view.setPlayWhenReadyProvider { playWhenReady }
+        // 平滑时钟按该速率积分；倍速变化由 updatePlaybackSpeed 落地。
+        // 此前固定 1f：倍速播放时平滑时钟必然落后视频位置，只能靠漂移监督器反复纠正。
         view.setPlaybackSpeedProvider { currentPlaybackSpeed }
         view.setConfigProvider { currentConfig }
     }
@@ -308,25 +327,25 @@ class BlblDanmakuController(
     }
 
     override fun updatePlaybackSpeed(speed: Float) {
-        val resolved = speed.takeIf { it.isFinite() && it > 0f } ?: 1f
-        if (currentPlaybackSpeed == resolved) return
-        currentPlaybackSpeed = resolved
-        // 稀疏时间线可能正处于 idle；主动请求一帧，让 timer 立即观察到倍速变化，
-        // 同时刷新 idle wake 使用的 latestPlaybackSpeed。
-        viewProvider()?.postInvalidateOnAnimation()
+        // 平滑时钟按真实倍速积分（provider 直接读该字段）。滚动时长仍由引擎按
+        // durationMs 推进，不受影响；此处只保证时钟积分速率与媒体钟一致。
+        currentPlaybackSpeed = speed.takeIf { it.isFinite() && it > 0f } ?: 1f
     }
 
     override fun notifyPlaybackStateChanged(@Suppress("UNUSED_PARAMETER") playbackState: Int, playWhenReady: Boolean) {
-        // playWhenReady 作为 isPlaying 的候选值之一（buffering 时 isPlaying=false 会由
-        // notifyIsPlayingChanged 覆盖），用 volatile 字段避免事件顺序竞争。
+        // playWhenReady 只表达"想播放"（用于渲染循环启停），绝不写入 isPlaying：
+        // BUFFERING(pwr=true) 期间媒体时钟冻结，若此时 isPlaying=true，DanmakuTimer 会
+        // 按墙上时钟继续积分 → 平滑时钟系统性超前（开播解码预热即注入 +1.2s，卡顿期持续
+        // 累积），漂移越过 2s 阈值被硬回拉时在屏弹幕位置倒跳重滚/按超前时钟提前退场。
+        // isPlaying 的唯一权威来源是 notifyIsPlayingChanged（ExoPlayer 实际解码中）。
         val wasPlaying = isPlaying
         this.playWhenReady = playWhenReady
-        isPlaying = playWhenReady
-        // isPlaying 从 false→true 时必须主动 invalidate，否则引擎 Choreographer 已停，
-        // 没有 onDraw 触发就不会重启渲染循环 → 弹幕卡住/消失。
+        // 播放意图恢复（后台返回/buffering 想播）时主动 invalidate，让渲染循环重启
+        // （循环启停看 isPlaying || playWhenReady，时钟推进只看 isPlaying）。
         if (!wasPlaying && playWhenReady) {
             viewProvider()?.invalidate()
         }
+        if (playWhenReady) startDriftSync()
     }
 
     override fun notifyIsPlayingChanged(playing: Boolean) {
@@ -372,8 +391,10 @@ class BlblDanmakuController(
 
     override fun resume() {
         val wasPlaying = isPlaying
+        // 只表达"想播放"。不写 isPlaying：后台返回后 ExoPlayer 可能还要 buffering 数百毫秒，
+        // 此时强行 isPlaying=true 会让平滑时钟在媒体钟冻结期继续积分（漂移注入）。
+        // 实际开始推进由 notifyIsPlayingChanged(true) / notifyPlaybackFirstFrame() 兜底。
         playWhenReady = true
-        isPlaying = true
         renderingStopped = false
         livePaused = false
         if (dataStopped && rawItems.isNotEmpty()) {
@@ -381,6 +402,7 @@ class BlblDanmakuController(
             requestDataResume()
         }
         if (!wasPlaying) viewProvider()?.invalidate()
+        startDriftSync()
     }
 
     override fun stop() {
@@ -389,6 +411,7 @@ class BlblDanmakuController(
         isPlaying = false
         renderingStopped = true
         resumeDataRequested = false
+        stopDriftSync()
         // 仅清引擎 active 数据，保留 rawItems：切后台 stop 后，切回前台播放时
         // notifyIsPlayingChanged/notifyPlaybackFirstFrame 会用 rawItems 重新喂数据恢复弹幕。
         // （此前清 rawItems 导致切后台再回来弹幕永久消失，直到重新播放。）
@@ -418,8 +441,89 @@ class BlblDanmakuController(
         // 非 seek 时靠 positionProvider 自动跟，无需处理
     }
 
+    /**
+     * 漂移监督器：周期比较引擎平滑时钟与视频位置，三段式治理
+     * （策略对齐兼容引擎 MyPlayerDanmakuController 的线上实现）：
+     *  1. |drift| ≤ 死区(250ms)：factor=1，弹幕按原速走；
+     *  2. 死区 < |drift| ≤ 硬阈值(2000ms)：factor ±5% 软同步，数秒内无感收敛；
+     *  3. |drift| > 硬阈值：连续 3 拍去抖确认后按方向硬校准——
+     *     - 引擎落后（视频前跳）：走 notifySeek 完整重建，与用户 seek 同路径；
+     *     - 引擎超前（卡顿期积分过多）：只轻量移动时钟指针，回退由引擎单调钳制
+     *       吸收为"冻结等 raw 追上"，绝不能 notifySeek——回看路径会清防重放历史，
+     *       最近一个滚动窗口重放，正是"同一条弹幕再滚一遍"的根因。
+     */
+    private fun startDriftSync() {
+        if (driftSyncJob?.isActive == true) return
+        driftSyncJob = controllerScope.launch {
+            while (isActive) {
+                delay(DRIFT_SYNC_INTERVAL_MS)
+                withContext(Dispatchers.Main.immediate) {
+                    applyDriftSyncTick()
+                }
+            }
+        }
+    }
+
+    private fun stopDriftSync() {
+        driftSyncJob?.cancel()
+        driftSyncJob = null
+        consecutiveHardSyncCount = 0
+        viewProvider()?.updateDanmakuTimeFactor(1f)
+    }
+
+    private fun applyDriftSyncTick() {
+        if (!isPlaying) {
+            // 暂停/buffering 期时钟冻结，不会产生新漂移；恢复原速等播放继续。
+            consecutiveHardSyncCount = 0
+            viewProvider()?.updateDanmakuTimeFactor(1f)
+            return
+        }
+        val view = viewProvider() ?: return
+        val videoPos = playerPositionProvider?.invoke()?.coerceAtLeast(0L) ?: return
+        val enginePos = view.currentDanmakuPositionMs()
+        val signedDrift = enginePos - videoPos
+        val absDrift = abs(signedDrift)
+        when {
+            absDrift > DRIFT_HARD_SYNC_THRESHOLD_MS -> {
+                consecutiveHardSyncCount++
+                if (consecutiveHardSyncCount >= DRIFT_HARD_SYNC_DEBOUNCE) {
+                    AppLog.w(
+                        TAG,
+                        "drift hard sync engine=${enginePos}ms video=${videoPos}ms " +
+                            "delta=${signedDrift}ms backward=${signedDrift > 0}"
+                    )
+                    consecutiveHardSyncCount = 0
+                    view.updateDanmakuTimeFactor(1f)
+                    if (signedDrift > 0) {
+                        // 引擎超前：轻量校准，回退被引擎单调钳制吸收（在屏弹幕冻结等追上）。
+                        view.syncDanmakuTimerTo(videoPos)
+                    } else {
+                        // 引擎落后：完整 seek 重建（与用户 seek 同路径）。
+                        view.notifySeek(videoPos)
+                    }
+                } else {
+                    // 未达去抖阈值：先软纠正过渡，给卡顿恢复留时间，避免偶发偏差直接硬校准。
+                    view.updateDanmakuTimeFactor(softCorrectionFor(signedDrift))
+                }
+            }
+            absDrift > DRIFT_NEUTRAL_TOLERANCE_MS -> {
+                consecutiveHardSyncCount = 0
+                view.updateDanmakuTimeFactor(softCorrectionFor(signedDrift))
+            }
+            else -> {
+                consecutiveHardSyncCount = 0
+                view.updateDanmakuTimeFactor(1f)
+            }
+        }
+    }
+
+    /** 引擎超前 → 放慢 5%；落后 → 加快 5%。只作用于 timer 的软同步因子，不触发重锚。 */
+    private fun softCorrectionFor(signedDrift: Long): Float =
+        if (signedDrift > 0) 1f - DRIFT_SOFT_CORRECTION else 1f + DRIFT_SOFT_CORRECTION
+
     override fun release() {
         stop()
+        stopDriftSync()
         prepareJob?.cancel()
         preloadTextureJob?.cancel()
         controllerScope.cancel()
