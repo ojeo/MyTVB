@@ -14,9 +14,9 @@ import java.util.Locale
 class DebugLogAdapter : ListAdapter<AppLog.LogEntry, DebugLogAdapter.ViewHolder>(DIFF_CALLBACK) {
 
     private var focusedPosition = RecyclerView.NO_POSITION
+    private var attachedRecyclerView: RecyclerView? = null
 
     companion object {
-        private const val PAYLOAD_FOCUS = "payload_focus"
         private val TIME_FORMAT = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault())
 
         private val DIFF_CALLBACK = object : DiffUtil.ItemCallback<AppLog.LogEntry>() {
@@ -47,8 +47,21 @@ class DebugLogAdapter : ListAdapter<AppLog.LogEntry, DebugLogAdapter.ViewHolder>
     }
 
     fun setData(items: List<AppLog.LogEntry>) {
-        focusedPosition = RecyclerView.NO_POSITION
+        // 日志是持续追加的，刷新时保留焦点高亮位置，避免每秒自动刷新把高亮刷没；
+        // 仅在列表被清空或焦点位置越界时重置。
+        val keepFocus = items.isNotEmpty() && focusedPosition in items.indices
+        if (!keepFocus) focusedPosition = RecyclerView.NO_POSITION
         submitList(items)
+    }
+
+    override fun onAttachedToRecyclerView(recyclerView: RecyclerView) {
+        super.onAttachedToRecyclerView(recyclerView)
+        attachedRecyclerView = recyclerView
+    }
+
+    override fun onDetachedFromRecyclerView(recyclerView: RecyclerView) {
+        super.onDetachedFromRecyclerView(recyclerView)
+        attachedRecyclerView = null
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
@@ -75,6 +88,10 @@ class DebugLogAdapter : ListAdapter<AppLog.LogEntry, DebugLogAdapter.ViewHolder>
     ) : RecyclerView.ViewHolder(binding.root) {
 
         init {
+            // 焦点高亮一律直接改 View，不调 notifyItemChanged()。
+            // 焦点变化可能发生在 RecyclerView 的 removeDetachedView（切换 Fragment /
+            // 列表回收）过程中，此时 notify 会触发 assertNotInLayoutOrScroll，抛
+            // "Cannot call this method while RecyclerView is computing a layout or scrolling"。
             binding.root.setOnFocusChangeListener { _, hasFocus ->
                 val position = bindingAdapterPosition
                 if (position == RecyclerView.NO_POSITION) return@setOnFocusChangeListener
@@ -82,12 +99,13 @@ class DebugLogAdapter : ListAdapter<AppLog.LogEntry, DebugLogAdapter.ViewHolder>
                     val old = focusedPosition
                     focusedPosition = position
                     if (old != RecyclerView.NO_POSITION && old != position) {
-                        notifyItemChanged(old, PAYLOAD_FOCUS)
+                        (attachedRecyclerView?.findViewHolderForAdapterPosition(old) as? ViewHolder)
+                            ?.bindFocusState(false)
                     }
-                    notifyItemChanged(position, PAYLOAD_FOCUS)
+                    bindFocusState(true)
                 } else if (focusedPosition == position) {
                     focusedPosition = RecyclerView.NO_POSITION
-                    notifyItemChanged(position, PAYLOAD_FOCUS)
+                    bindFocusState(false)
                 }
             }
         }

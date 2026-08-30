@@ -167,9 +167,16 @@ class DebugLogFragment : BaseFragment<FragmentDebugLogBinding>() {
             filtered
         }
         val wasAtBottom = !binding.recyclerView.canScrollVertically(1)
-        adapter.setData(displayList)
-        if (wasAtBottom && displayList.isNotEmpty()) {
-            binding.recyclerView.scrollToPosition(displayList.size - 1)
+        val recyclerView = binding.recyclerView
+        // post 到下一帧再提交：本方法有每秒一次的自动刷新，若恰好在 RecyclerView
+        // 布局/滚动过程中同步 notify，会抛
+        // "Cannot call this method while RecyclerView is computing a layout or scrolling"。
+        recyclerView.post {
+            if (!isAdded) return@post
+            adapter.setData(displayList)
+            if (wasAtBottom && displayList.isNotEmpty()) {
+                recyclerView.scrollToPosition(displayList.size - 1)
+            }
         }
         lastLogCount = logs.size
     }
