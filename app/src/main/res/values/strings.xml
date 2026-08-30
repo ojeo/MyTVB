@@ -443,4 +443,36 @@
     <string name="detail">简介详情</string>
     <string name="wednesday">周三</string>
     <string name="zone">分区</string>
+
+    <!-- 遥控器快捷键绑定 -->
+    <string name="key_binding_settings">快捷键设置</string>
+    <string name="key_binding_title">快捷键设置</string>
+    <string name="key_binding_apply_recommended">应用推荐方案</string>
+    <string name="key_binding_clear_all">清除全部绑定</string>
+    <string name="key_binding_section_player_desc">播放视频时按下按键触发</string>
+    <string name="key_binding_section_global_desc">在主界面时按下按键触发</string>
+    <string name="key_capture_hint">请按下遥控器上要绑定的按键</string>
+    <string name="key_capture_clear">清除绑定</string>
+    <string name="key_capture_unsupported">该按键不可用（code=%1$d），请换一个按键</string>
+    <string name="key_capture_conflict_title">按键冲突</string>
+    <string name="key_capture_conflict_message">该按键已绑定「%1$s」，是否替换为「%2$s」？</string>
+    <string name="key_binding_applied_recommended">已应用推荐方案</string>
+    <string name="key_binding_cleared_all">已清除全部绑定</string>
+    <string name="key_binding_unbound">已清除绑定</string>
+    <string name="key_binding_bound_to">%1$s：%2$s</string>
+    <string name="need_sign_in_first">请先登录</string>
+    <string name="live_entry_disabled">直播入口已关闭</string>
+    <string name="danmaku_on">弹幕已开启</string>
+    <string name="danmaku_off">弹幕已关闭</string>
+    <string name="playback_speed_changed">倍速 %1$sx（%2$d/%3$d）</string>
+    <string name="playback_speed_max">已是最高倍速 %1$sx</string>
+    <string name="playback_speed_min">已是最低倍速 %1$sx</string>
+    <string name="video_info_not_ready">当前视频信息未加载完成</string>
+    <string name="repeat_mode_single">单集循环</string>
+    <string name="repeat_mode_sequential">顺序播放</string>
+    <string name="subtitle_unavailable">当前视频无字幕</string>
+    <string name="episode_no_previous">已是第一集</string>
+    <string name="episode_no_next">已是最后一集</string>
+    <string name="category_entry_disabled">分类入口已关闭</string>
+    <string name="cctv_live_entry_disabled">电视直播入口已关闭</string>
 </resources>

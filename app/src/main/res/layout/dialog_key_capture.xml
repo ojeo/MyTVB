@@ -1,0 +1,197 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  按键捕获对话框。
+  - 根布局宽度用 match_parent（与 dialog_usage_tip.xml 一致），由对话框窗口自动适配
+    屏幕宽度；高度 wrap_content 按内容收缩。不要改回固定 px 宽度——
+    固定物理像素宽度在高分辨率电视上只占屏幕很小比例，会显示成窄条。
+  - 冲突确认复用同一个 dialog_root（切换 capture_container / conflict_container 的可见性），
+    这样确认框天然继承 @drawable/dialog_background 背景。不要用 AlertDialog.Builder +
+    R.style.DialogTheme：该主题把 windowBackground 设为 transparent，弹窗会与黑色底混在一起。
+-->
+<androidx.appcompat.widget.LinearLayoutCompat xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/dialog_root"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@drawable/dialog_background"
+    android:descendantFocusability="afterDescendants"
+    android:gravity="center_horizontal"
+    android:orientation="vertical"
+    android:paddingStart="@dimen/px50"
+    android:paddingTop="@dimen/px40"
+    android:paddingEnd="@dimen/px50"
+    android:paddingBottom="@dimen/px40">
+
+    <!-- ============ 状态一：等待按键 ============ -->
+    <androidx.appcompat.widget.LinearLayoutCompat
+        android:id="@+id/capture_container"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_horizontal"
+        android:orientation="vertical">
+
+        <androidx.appcompat.widget.AppCompatTextView
+            android:id="@+id/top_title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="@color/textColor"
+            android:textSize="@dimen/px35"
+            android:textStyle="bold" />
+
+        <View
+            android:id="@+id/title_divider"
+            android:layout_width="match_parent"
+            android:layout_height="@dimen/px2"
+            android:layout_marginStart="@dimen/px18"
+            android:layout_marginTop="@dimen/px20"
+            android:layout_marginEnd="@dimen/px18"
+            android:background="?attr/dividerColor" />
+
+        <androidx.appcompat.widget.AppCompatTextView
+            android:id="@+id/tv_hint"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/px30"
+            android:gravity="center"
+            android:text="@string/key_capture_hint"
+            android:textColor="?android:attr/textColorSecondary"
+            android:textSize="@dimen/px30" />
+
+        <androidx.appcompat.widget.AppCompatTextView
+            android:id="@+id/tv_captured"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/px20"
+            android:gravity="center"
+            android:textColor="?android:attr/textColorPrimary"
+            android:textSize="@dimen/px36"
+            android:textStyle="bold" />
+
+        <androidx.appcompat.widget.LinearLayoutCompat
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/px40"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <androidx.appcompat.widget.AppCompatTextView
+                android:id="@+id/button_clear"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="@dimen/px24"
+                android:layout_weight="1"
+                android:background="@drawable/cell_background"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:paddingStart="@dimen/px30"
+                android:paddingTop="@dimen/px20"
+                android:paddingEnd="@dimen/px30"
+                android:paddingBottom="@dimen/px20"
+                android:text="@string/key_capture_clear"
+                android:textColor="?android:attr/textColorPrimary"
+                android:textSize="@dimen/px30"
+                android:textStyle="bold" />
+
+            <androidx.appcompat.widget.AppCompatTextView
+                android:id="@+id/button_cancel"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:background="@drawable/cell_background"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:paddingStart="@dimen/px30"
+                android:paddingTop="@dimen/px20"
+                android:paddingEnd="@dimen/px30"
+                android:paddingBottom="@dimen/px20"
+                android:text="@string/cancel"
+                android:textColor="?android:attr/textColorPrimary"
+                android:textSize="@dimen/px30"
+                android:textStyle="bold" />
+        </androidx.appcompat.widget.LinearLayoutCompat>
+    </androidx.appcompat.widget.LinearLayoutCompat>
+
+    <!-- ============ 状态二：按键冲突确认（初始 GONE） ============ -->
+    <androidx.appcompat.widget.LinearLayoutCompat
+        android:id="@+id/conflict_container"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_horizontal"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <androidx.appcompat.widget.AppCompatTextView
+            android:id="@+id/conflict_title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/key_capture_conflict_title"
+            android:textColor="@color/textColor"
+            android:textSize="@dimen/px35"
+            android:textStyle="bold" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="@dimen/px2"
+            android:layout_marginStart="@dimen/px18"
+            android:layout_marginTop="@dimen/px20"
+            android:layout_marginEnd="@dimen/px18"
+            android:background="?attr/dividerColor" />
+
+        <androidx.appcompat.widget.AppCompatTextView
+            android:id="@+id/conflict_message"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/px30"
+            android:gravity="center"
+            android:lineSpacingMultiplier="1.3"
+            android:textColor="?android:attr/textColorSecondary"
+            android:textSize="@dimen/px30" />
+
+        <androidx.appcompat.widget.LinearLayoutCompat
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/px40"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <androidx.appcompat.widget.AppCompatTextView
+                android:id="@+id/button_replace"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="@dimen/px24"
+                android:layout_weight="1"
+                android:background="@drawable/cell_background"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:paddingStart="@dimen/px30"
+                android:paddingTop="@dimen/px20"
+                android:paddingEnd="@dimen/px30"
+                android:paddingBottom="@dimen/px20"
+                android:text="@string/confirm"
+                android:textColor="@color/pink"
+                android:textSize="@dimen/px30"
+                android:textStyle="bold" />
+
+            <androidx.appcompat.widget.AppCompatTextView
+                android:id="@+id/button_conflict_cancel"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:background="@drawable/cell_background"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:paddingStart="@dimen/px30"
+                android:paddingTop="@dimen/px20"
+                android:paddingEnd="@dimen/px30"
+                android:paddingBottom="@dimen/px20"
+                android:text="@string/cancel"
+                android:textColor="?android:attr/textColorPrimary"
+                android:textSize="@dimen/px30"
+                android:textStyle="bold" />
+        </androidx.appcompat.widget.LinearLayoutCompat>
+    </androidx.appcompat.widget.LinearLayoutCompat>
+
+</androidx.appcompat.widget.LinearLayoutCompat>

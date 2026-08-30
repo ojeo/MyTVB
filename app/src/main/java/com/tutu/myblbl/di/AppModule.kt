@@ -110,6 +110,7 @@ val eventModule = module {
     single { AppEventHub() }
     single { AppSettingsDataStore(androidContext()) }
     single { DouyinModeManager(androidContext(), get(), get(), get(named("noCookie")), get()) }
+    single { com.tutu.myblbl.feature.keybinding.KeyBindingStore(get()) }
 }
 
 val appModules = listOf(

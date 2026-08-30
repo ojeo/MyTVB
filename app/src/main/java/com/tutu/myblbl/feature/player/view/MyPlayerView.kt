@@ -2105,6 +2105,11 @@ class MyPlayerView @JvmOverloads constructor(
         activeDanmakuController()?.updatePlaybackSpeed(speed)
     }
 
+    /** 当前播放倍速；播放实例尚未创建时返回 1.0f。 */
+    fun getCurrentSpeed(): Float {
+        return player?.playbackParameters?.speed ?: 1.0f
+    }
+
     fun setAfterPlayMode(mode: com.tutu.myblbl.feature.player.settings.AfterPlayMode) {
         pendingAfterPlayMode = mode
         settingView?.setAfterPlayMode(mode)
@@ -2836,6 +2841,11 @@ class MyPlayerView @JvmOverloads constructor(
         activeDanmakuController()?.setEnabled(enabled)
         dmMaskController.setDanmakuVisible(enabled)
         updateVideoFrameRateStrategy(enabled)
+    }
+
+    /** 弹幕是否处于开启状态；设置面板尚未创建时按"开启"处理。 */
+    fun isDanmakuEnabled(): Boolean {
+        return settingView?.getDmEnable() ?: true
     }
 
     fun pauseDanmaku() {

@@ -44,6 +44,8 @@ class HomeFragment : Fragment(), MainTabFocusTarget {
     private var tabSelectedListener: TabLayout.OnTabSelectedListener? = null
     private var lastTabSelectedPosition = -1
     private var lastTabSelectedTime = 0L
+    /** 视图尚未创建时暂存的待切换子页，见 [selectPage]。 */
+    private var pendingPage: Int? = null
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -110,6 +112,12 @@ class HomeFragment : Fragment(), MainTabFocusTarget {
         }
 
         binding.viewPager.currentItem = getDefaultTabIndex()
+        pendingPage?.let { page ->
+            pendingPage = null
+            if (page != binding.viewPager.currentItem) {
+                binding.viewPager.currentItem = page
+            }
+        }
         AppLog.i("STARTUP", "HomeFragment.onViewCreated elapsed=${SystemClock.elapsedRealtime() - t0}ms")
     }
 
@@ -194,6 +202,23 @@ class HomeFragment : Fragment(), MainTabFocusTarget {
     fun isCurrentPage(position: Int): Boolean {
         val currentBinding = _binding ?: return false
         return currentBinding.viewPager.currentItem == position
+    }
+
+    /**
+     * 切换到指定子页（0 推荐 / 1 热门 / 2 番剧 / 3 影视）。
+     *
+     * 供遥控器快捷键调用：视图尚未创建时先记录，等 [onViewCreated] 建好 ViewPager 再落地。
+     */
+    fun selectPage(position: Int) {
+        val currentBinding = _binding
+        if (currentBinding == null) {
+            pendingPage = position
+            return
+        }
+        pendingPage = null
+        if (currentBinding.viewPager.currentItem != position) {
+            currentBinding.viewPager.currentItem = position
+        }
     }
 
     private fun notifyTabSelected(position: Int, retries: Int = 5) {

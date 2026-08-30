@@ -48,6 +48,9 @@ class MeFragment : BaseFragment<FragmentMeBinding>(), MainTabFocusTarget {
     private var tabSelectedListener: TabLayout.OnTabSelectedListener? = null
     private var pendingRefreshAfterLogin = false
     private var wasLoggedInOnPause = false
+    /** 视图尚未创建时暂存的待切换子页，见 [selectPage]。 */
+    private var pendingPage: Int? = null
+    private var viewReady = false
 
     override fun getViewBinding(
         inflater: LayoutInflater,
@@ -99,7 +102,30 @@ class MeFragment : BaseFragment<FragmentMeBinding>(), MainTabFocusTarget {
         }.also { viewPager.registerOnPageChangeCallback(it) }
 
         viewPager.currentItem = getDefaultTabIndex()
+        viewReady = true
+        pendingPage?.let { page ->
+            pendingPage = null
+            if (viewPager.currentItem != page) {
+                viewPager.currentItem = page
+            }
+        }
         viewPager.post { notifyCurrentTab { it.onTabSelected() } }
+    }
+
+    /**
+     * 切换到指定子页（0 历史 / 1 收藏 / 2 稍后再看）。
+     *
+     * 供遥控器快捷键调用：视图尚未创建时先记录，等 [initView] 建好 ViewPager 再落地。
+     */
+    fun selectPage(position: Int) {
+        if (!viewReady) {
+            pendingPage = position
+            return
+        }
+        pendingPage = null
+        if (viewPager.currentItem != position) {
+            viewPager.currentItem = position
+        }
     }
 
     override fun onPause() {
@@ -289,6 +315,7 @@ class MeFragment : BaseFragment<FragmentMeBinding>(), MainTabFocusTarget {
     }
 
     override fun onDestroyView() {
+        viewReady = false
         pageChangeCallback?.let(viewPager::unregisterOnPageChangeCallback)
         pageChangeCallback = null
         tabSelectedListener?.let { tabLayout.removeOnTabSelectedListener(it) }

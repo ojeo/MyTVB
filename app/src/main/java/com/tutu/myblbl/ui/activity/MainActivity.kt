@@ -59,7 +59,9 @@ import org.koin.android.ext.android.inject
 import java.lang.ref.WeakReference
 
 @OptIn(UnstableApi::class)
-class MainActivity : BaseActivity<ActivityMainBinding>(), TabBarView.OnTabClickListener {
+class MainActivity : BaseActivity<ActivityMainBinding>(),
+    TabBarView.OnTabClickListener,
+    com.tutu.myblbl.feature.keybinding.GlobalKeyBindingNavigator.Navigator {
 
     private data class FocusRestoreAnchor(
         val viewRef: WeakReference<View>
@@ -72,6 +74,24 @@ class MainActivity : BaseActivity<ActivityMainBinding>(), TabBarView.OnTabClickL
         private const val SEARCH_TAB_INDEX = 6
         private const val STARTUP_TAG = "AppStartup"
         private const val TEEN_REST_DIAG_TAG = "TeenRestDiag"
+
+        // 主 Tab 索引（与 fragmentFactories 一一对应）
+        private const val HOME_TAB_INDEX = 0
+        private const val CATEGORY_TAB_INDEX = 1
+        private const val DYNAMIC_TAB_INDEX = 2
+        private const val LIVE_TAB_INDEX = 3
+        private const val ME_TAB_INDEX = 5
+
+        // HomeFragment 子页
+        private const val HOME_PAGE_RECOMMEND = 0
+        private const val HOME_PAGE_HOT = 1
+        private const val HOME_PAGE_ANIMATION = 2
+        private const val HOME_PAGE_CINEMA = 3
+
+        // MeFragment 子页
+        private const val ME_PAGE_HISTORY = 0
+        private const val ME_PAGE_FAVORITE = 1
+        private const val ME_PAGE_WATCH_LATER = 2
     }
 
     /** 青少年模式：休息遮罩倒计时 Handler，每秒刷新剩余时间。 */
@@ -102,6 +122,10 @@ class MainActivity : BaseActivity<ActivityMainBinding>(), TabBarView.OnTabClickL
     private val appEventHub: AppEventHub by inject()
     private val mainNavigationViewModel: MainNavigationViewModel by viewModels()
     private val sessionGateway: NetworkSessionGateway by inject()
+    private val keyBindingStore: com.tutu.myblbl.feature.keybinding.KeyBindingStore by inject()
+    private val globalKeyBindingNavigator: com.tutu.myblbl.feature.keybinding.GlobalKeyBindingNavigator by lazy {
+        com.tutu.myblbl.feature.keybinding.GlobalKeyBindingNavigator(keyBindingStore, this)
+    }
     private val userRepository: UserRepository by inject()
     private var currentFragmentIndex = -1
     private var exitTime: Long = 0
@@ -960,7 +984,90 @@ class MainActivity : BaseActivity<ActivityMainBinding>(), TabBarView.OnTabClickL
                 mainNavigationViewModel.dispatch(MainNavigationViewModel.Event.MenuPressed)
             }
         }
+        // 遥控器快捷键（场景 B）：仅在无浮层页面、焦点不在输入框时生效。
+        // Activity.onKeyDown 只在 View 树未消费时回调，搜索键盘/输入框天然优先。
+        if (event?.action == android.view.KeyEvent.ACTION_DOWN &&
+            supportFragmentManager.backStackEntryCount == 0 &&
+            currentFocus !is android.widget.EditText &&
+            globalKeyBindingNavigator.handle(keyCode)
+        ) {
+            return true
+        }
         return super.onKeyDown(keyCode, event)
+    }
+
+    // --- 遥控器快捷键（场景 B）跳转目标 ---
+
+    override fun toRecommend() = navigateHomePage(HOME_PAGE_RECOMMEND)
+
+    override fun toHot() = navigateHomePage(HOME_PAGE_HOT)
+
+    override fun toDynamic() = selectMainTab(DYNAMIC_TAB_INDEX)
+
+    override fun toLive() {
+        if (!binding.myTabView.isLiveButtonVisible()) {
+            Toast.makeText(this, R.string.live_entry_disabled, Toast.LENGTH_SHORT).show()
+            return
+        }
+        selectMainTab(LIVE_TAB_INDEX)
+    }
+
+    override fun toFavorite() = navigateMePage(ME_PAGE_FAVORITE)
+
+    override fun toWatchLater() = navigateMePage(ME_PAGE_WATCH_LATER)
+
+    override fun toSearch() = openSearch()
+
+    override fun toHistory() = navigateMePage(ME_PAGE_HISTORY)
+
+    override fun toAnimation() = navigateHomePage(HOME_PAGE_ANIMATION)
+
+    override fun toCinema() = navigateHomePage(HOME_PAGE_CINEMA)
+
+    override fun toCategory() {
+        if (!binding.myTabView.isCategoryButtonVisible()) {
+            Toast.makeText(this, R.string.category_entry_disabled, Toast.LENGTH_SHORT).show()
+            return
+        }
+        selectMainTab(CATEGORY_TAB_INDEX)
+    }
+
+    override fun toCctvLive() {
+        if (!binding.myTabView.isCctvLiveButtonVisible()) {
+            Toast.makeText(this, R.string.cctv_live_entry_disabled, Toast.LENGTH_SHORT).show()
+            return
+        }
+        // 与 Tab 点击行为保持一致：CCTV tab 不持有 Fragment，直接进 Marmot 播放器
+        com.tutu.myblbl.ui.activity.MarmotLiveActivity.start(this)
+        binding.myTabView.focusCurrentTab()
+    }
+
+    override fun openSettings() = onSettingClick()
+
+    private fun selectMainTab(index: Int) {
+        binding.myTabView.selectTab(index)
+    }
+
+    private fun navigateHomePage(page: Int) {
+        selectMainTab(HOME_TAB_INDEX)
+        homeFragment()?.selectPage(page)
+    }
+
+    private fun navigateMePage(page: Int) {
+        selectMainTab(ME_TAB_INDEX)
+        meFragment()?.selectPage(page)
+    }
+
+    private fun homeFragment(): com.tutu.myblbl.feature.home.HomeFragment? {
+        return supportFragmentManager.findFragmentByTag("fragment_$HOME_TAB_INDEX")
+            as? com.tutu.myblbl.feature.home.HomeFragment
+            ?: fragments.getOrNull(HOME_TAB_INDEX) as? com.tutu.myblbl.feature.home.HomeFragment
+    }
+
+    private fun meFragment(): com.tutu.myblbl.feature.me.MeFragment? {
+        return supportFragmentManager.findFragmentByTag("fragment_$ME_TAB_INDEX")
+            as? com.tutu.myblbl.feature.me.MeFragment
+            ?: fragments.getOrNull(ME_TAB_INDEX) as? com.tutu.myblbl.feature.me.MeFragment
     }
 
     private fun isInsideRecyclerView(view: View): Boolean {

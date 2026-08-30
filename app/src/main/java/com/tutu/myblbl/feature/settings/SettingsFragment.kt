@@ -209,7 +209,8 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
             SettingModel(getString(R.string.show_video_detail_page), "关"),
             SettingModel(getString(R.string.give_coin_number), "2"),
             SettingModel(getString(R.string.ipv4_only), "开"),
-            SettingModel(getString(R.string.douyin_mode), "关")
+            SettingModel(getString(R.string.douyin_mode), "关"),
+            SettingModel(getString(R.string.key_binding_settings), "")
         )
 
         // 青少年模式分类：青少年保护开关 + 单次观看时长 + 休息时长 + 公益广告开关 + 公益广告间隔
@@ -530,6 +531,13 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
             8 -> showCommonChoiceDialog(position, KEY_GIVE_COIN_NUMBER, arrayOf("1", "2"))
             9 -> toggleSetting(commonSettings, 9, KEY_IPV4_ONLY)
             10 -> toggleSetting(commonSettings, 10, KEY_DOUYIN_MODE)
+            11 -> {
+                val activity = activity as? MainActivity
+                activity?.openOverlayFragment(
+                    com.tutu.myblbl.feature.keybinding.KeyBindingFragment.newInstance(),
+                    "key_binding"
+                )
+            }
             commonSettings.lastIndex - 1 -> {
                 val newValue = if (AppLog.isEnabled) "关" else "开"
                 AppLog.setEnabled(newValue == "开")
