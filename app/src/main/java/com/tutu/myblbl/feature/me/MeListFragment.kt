@@ -38,6 +38,7 @@ import com.tutu.myblbl.core.ui.refresh.SwipeRefreshHelper
 import com.tutu.myblbl.core.navigation.VideoRouteNavigator
 import com.tutu.myblbl.core.ui.render.FirstScreenRenderer
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -92,6 +93,8 @@ class MeListFragment : BaseFragment<FragmentMeTabListBinding>(), MeTabPage, com.
     private var lastRenderedLaterSignature = ""
     private var allowHistoryLoadMore = false
     private var returningFromPlayer = false
+    /** onTabSelected 在视图就绪前被触发时的延迟重试标志，防止重复排期。 */
+    private var pendingOnTabSelectedRetry = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -205,6 +208,18 @@ class MeListFragment : BaseFragment<FragmentMeTabListBinding>(), MeTabPage, com.
         AppLog.d("MePerf", "MeListFragment.initData: type=$type, network_only")
         // 不在 initData 里直接 loadData()，等 onTabSelected() 触发首次加载，
         // 避免相邻 tab 被预加载时也发起网络请求。
+        // 例外：快捷键在首次创建"我的"页时切到目标子页，ViewPager 首次布局会先建默认页
+        // 再滚到目标页，目标页 fragment 可能在布局过程中被重建，重建后的实例收不到
+        // onTabSelected。这里按首页同款策略：本页就是当前页时，initData 直接触发首次加载。
+        if (isCurrentPage()) {
+            AppLog.d("MeDebug", "[$type] initData: current page, load immediately")
+            currentPage = 1
+            loadData()
+        }
+    }
+
+    private fun isCurrentPage(): Boolean {
+        return (parentFragment as? MeFragment)?.isCurrentPage(this) == true
     }
 
     override fun onResume() {
@@ -732,8 +747,21 @@ class MeListFragment : BaseFragment<FragmentMeTabListBinding>(), MeTabPage, com.
 
     override fun onTabSelected() {
         AppLog.d("MeDebug", "[$type] onTabSelected: isAdded=$isAdded, hasView=${view != null}, loading=${viewModel.loading.value}, hasContent=${hasContentItems()}, returningFromPlayer=$returningFromPlayer")
-        if (!isAdded || view == null) {
-            AppLog.d("MeDebug", "[$type] onTabSelected: EARLY RETURN (isAdded/view)")
+        if (!isAdded) {
+            return
+        }
+        if (view == null) {
+            // 快捷键/宿主事件早于视图创建时触发：延迟到视图就绪再重试，避免首次加载丢失
+            if (!pendingOnTabSelectedRetry) {
+                pendingOnTabSelectedRetry = true
+                viewLifecycleOwner.lifecycleScope.launch {
+                    delay(60L)
+                    pendingOnTabSelectedRetry = false
+                    if (isAdded && view != null) {
+                        onTabSelected()
+                    }
+                }
+            }
             return
         }
         if (pendingRestoreFocus && hasContentItems()) {

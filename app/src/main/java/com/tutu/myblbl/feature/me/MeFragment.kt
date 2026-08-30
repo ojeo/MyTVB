@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -109,7 +110,7 @@ class MeFragment : BaseFragment<FragmentMeBinding>(), MainTabFocusTarget {
                 viewPager.currentItem = page
             }
         }
-        viewPager.post { notifyCurrentTab { it.onTabSelected() } }
+        notifyCurrentTabWithRetry({ it.onTabSelected() })
     }
 
     /**
@@ -126,6 +127,18 @@ class MeFragment : BaseFragment<FragmentMeBinding>(), MainTabFocusTarget {
         if (viewPager.currentItem != position) {
             viewPager.currentItem = position
         }
+    }
+
+    /**
+     * 判断 [fragment] 是否为当前子页的实例（供子页在 initData 时决定是否立即加载）。
+     *
+     * 快捷键在首次创建本页时切到非默认子页，ViewPager 首次布局可能把目标页 Fragment
+     * 先建一次又重建，重建后的实例收不到 onTabSelected。子页 initData 用引用相等判断
+     * "我是不是当前页"，是就直接加载，不依赖通知时序。
+     */
+    fun isCurrentPage(fragment: Fragment): Boolean {
+        if (!viewReady) return false
+        return adapter.getFragment(viewPager.currentItem) === fragment
     }
 
     override fun onPause() {
@@ -269,16 +282,19 @@ class MeFragment : BaseFragment<FragmentMeBinding>(), MainTabFocusTarget {
         return adapter.getFragment(viewPager.currentItem) as? MeTabPage
     }
 
-    private fun notifyCurrentTab(action: (MeTabPage) -> Unit) {
-        getCurrentTabPage()?.let(action)
-    }
-
-    private fun notifyCurrentTabWithRetry(action: (MeTabPage) -> Unit, retries: Int = 5) {
+    /**
+     * 通知当前子页执行 [MeTabPage.onTabSelected]，重试直到子页 view 就绪。
+     *
+     * 初版只重试"子页 Fragment 为 null"且用立即 post：快捷键首次创建本页（懒创建）时，
+     * 5 次立即重试全在 ViewPager 首次布局之前耗尽，子页创建后 onTabSelected 永远等不到，
+     * 表现为"跳到稍后再看但列表空白"。改为同时等待 view 就绪 + postDelayed 跨帧重试。
+     */
+    private fun notifyCurrentTabWithRetry(action: (MeTabPage) -> Unit, retries: Int = 10) {
         val page = getCurrentTabPage()
-        if (page != null) {
+        if (page != null && (page as? Fragment)?.view != null) {
             action(page)
         } else if (retries > 0) {
-            viewPager.post { notifyCurrentTabWithRetry(action, retries - 1) }
+            viewPager.postDelayed({ notifyCurrentTabWithRetry(action, retries - 1) }, 50L)
         }
     }
 

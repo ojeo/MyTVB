@@ -112,9 +112,9 @@ class CategoryFragment : BaseFragment<FragmentCategoryBinding>(), MainTabFocusTa
     }
 
     override fun initData() {
-        binding.viewPager.post {
-            adapter.getCurrentFragment(viewPager.currentItem)?.onTabSelected()
-        }
+        // 初版只 post 一次：首次创建本页时子页 Fragment 尚未创建，onTabSelected 丢失。
+        // 改为带重试的通知，等待子页 view 就绪后再触发首次加载。
+        notifyTabSelected(viewPager.currentItem)
     }
 
     override fun initObserver() {
@@ -151,12 +151,19 @@ class CategoryFragment : BaseFragment<FragmentCategoryBinding>(), MainTabFocusTa
         adapter.getCurrentFragment(viewPager.currentItem)?.scrollToTop()
     }
 
-    private fun notifyTabSelected(position: Int, retries: Int = 5) {
+    /**
+     * 通知指定子页执行 onTabSelected，重试直到子页 view 就绪。
+     *
+     * 初版只重试"子页为 null"且用立即 post：首次创建本页时子页 Fragment 尚未创建，
+     * 重试全在 ViewPager 首次布局前耗尽，导致首屏空白。改为同时等待 view 就绪 +
+     * postDelayed 跨帧重试。
+     */
+    private fun notifyTabSelected(position: Int, retries: Int = 10) {
         val fragment = adapter.getCurrentFragment(position)
-        if (fragment != null) {
+        if (fragment != null && fragment.view != null) {
             fragment.onTabSelected()
         } else if (retries > 0) {
-            viewPager.post { notifyTabSelected(position, retries - 1) }
+            viewPager.postDelayed({ notifyTabSelected(position, retries - 1) }, 50L)
         }
     }
 
