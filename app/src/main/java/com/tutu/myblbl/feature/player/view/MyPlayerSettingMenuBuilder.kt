@@ -58,16 +58,16 @@ internal class MyPlayerSettingMenuBuilder(
         return listOf(
             PlayerSettingRow.Header(title = context.getString(R.string.setting)),
             PlayerSettingRow.Item(
-                id = MyPlayerSettingView.ITEM_VIDEO_QUALITY,
-                title = context.getString(R.string.video_quality),
-                value = state.currentVideoQuality?.name ?: "1080P",
-                iconRes = R.drawable.ic_video_play_count
-            ),
-            PlayerSettingRow.Item(
                 id = MyPlayerSettingView.ITEM_PLAYBACK_SPEED,
                 title = context.getString(R.string.playSpeed),
                 value = speedDisplayLabel(state.currentSpeed),
                 iconRes = R.drawable.exo_ic_speed
+            ),
+            PlayerSettingRow.Item(
+                id = MyPlayerSettingView.ITEM_VIDEO_QUALITY,
+                title = context.getString(R.string.video_quality),
+                value = state.currentVideoQuality?.name ?: "1080P",
+                iconRes = R.drawable.ic_video_play_count
             ),
             PlayerSettingRow.Item(
                 id = MyPlayerSettingView.ITEM_AFTER_PLAY,
