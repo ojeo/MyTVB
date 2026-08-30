@@ -37,11 +37,13 @@ class SearchFocusCoordinator(
 
     fun restoreSearchPanelFocus(
         anchorView: View? = null,
+        focusPrimary: (View?) -> Boolean,
         focusCenterColumn: (View?) -> Boolean,
         focusHotColumn: (View?) -> Boolean,
         focusKeyboard: () -> Boolean
     ): Boolean {
         return requestFocusIfAvailable(lastSearchPanelFocusedView) ||
+            focusPrimary(anchorView) ||
             focusCenterColumn(anchorView) ||
             focusHotColumn(anchorView) ||
             focusKeyboard()

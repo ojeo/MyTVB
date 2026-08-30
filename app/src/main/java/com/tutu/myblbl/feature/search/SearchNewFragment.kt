@@ -9,6 +9,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
@@ -41,6 +42,7 @@ import com.tutu.myblbl.core.ui.tab.enableTouchNavigation
 import com.tutu.myblbl.core.navigation.VideoRouteNavigator
 import com.tutu.myblbl.core.common.log.AppLog
 import com.tutu.myblbl.core.common.log.PagePerfLogger
+import com.tutu.myblbl.core.common.settings.AppSettingsDataStore
 import com.tutu.myblbl.core.ui.navigation.navigateBackFromUi
 import com.tutu.myblbl.core.ui.tab.focusNearestTabTo
 import com.tutu.myblbl.core.ui.tab.focusSelectedTab
@@ -49,6 +51,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import org.koin.android.ext.android.inject
 import org.koin.androidx.viewmodel.ext.android.viewModel
 
 @OptIn(FlowPreview::class)
@@ -58,6 +61,7 @@ class SearchNewFragment :
     KeyboardView.KeySelectListener {
 
     private val viewModel: SearchViewModel by viewModel()
+    private val appSettings: AppSettingsDataStore by inject()
     private lateinit var hotSearchAdapter: HotSearchAdapter
     private lateinit var centerAdapter: SearchSuggestAdapter
     private var resultPagerAdapter: SearchResultPagerAdapter? = null
@@ -78,6 +82,7 @@ class SearchNewFragment :
     private var lastAppliedCategories: List<SearchCategoryItem>? = null
     private var searchOpenStartMs = 0L
     private var searchResultStartMs = 0L
+    private var useSystemIme = false
     private val pageChangeCallback = object : ViewPager2.OnPageChangeCallback() {
         override fun onPageSelected(position: Int) {
             updateOrderButtonVisibility(position)
@@ -89,6 +94,7 @@ class SearchNewFragment :
         private const val TAG = "SearchFocus"
         private const val ARG_KEYWORD = "keyword"
         private const val SEARCH_PANEL_FOCUS_DELAY_MS = 48L
+        private const val KEY_USE_SYSTEM_IME = "searchUseSystemIme"
 
         fun newInstance(): SearchNewFragment = SearchNewFragment()
 
@@ -120,6 +126,7 @@ class SearchNewFragment :
             },
             resultPanelRoot = { binding.viewSearchResult }
         )
+        useSystemIme = appSettings.getCachedBoolean(KEY_USE_SYSTEM_IME, false)
         setupInput()
         setupKeyboard()
         setupKeywordColumns()
@@ -194,7 +201,14 @@ class SearchNewFragment :
     }
 
     private fun setupInput() {
-        binding.editText.showSoftInputOnFocus = false
+        applyInputMode()
+        setupInputModeToggle()
+
+        binding.editText.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) {
+                hideSystemIme()
+            }
+        }
 
         binding.editText.setOnKeyListener { view, keyCode, event ->
             if (event.action != KeyEvent.ACTION_DOWN) {
@@ -208,7 +222,7 @@ class SearchNewFragment :
                     } else {
                         focusCenterColumn(view) ||
                             focusHotColumn(view) ||
-                            binding.viewKeyboard.requestPrimaryFocus()
+                            focusKeyboardOrInput()
                     }
                 }
                 KeyEvent.KEYCODE_DPAD_RIGHT -> {
@@ -217,7 +231,7 @@ class SearchNewFragment :
                     } else {
                         focusCenterColumn(view) ||
                             focusHotColumn(view) ||
-                            binding.viewKeyboard.requestPrimaryFocus()
+                            focusKeyboardOrInput()
                     }
                 }
                 KeyEvent.KEYCODE_DPAD_UP -> true
@@ -257,6 +271,91 @@ class SearchNewFragment :
     private fun setupKeyboard() {
         binding.viewKeyboard.setKeySelectListener(this)
         binding.viewKeyboard.setDispatchKeyDel(true)
+    }
+
+    private fun setupInputModeToggle() {
+        binding.buttonInputMode.setOnClickListener { toggleInputMode() }
+        binding.buttonInputMode.setOnKeyListener { view, keyCode, event ->
+            if (event.action != KeyEvent.ACTION_DOWN) {
+                return@setOnKeyListener false
+            }
+            when (keyCode) {
+                KeyEvent.KEYCODE_DPAD_LEFT -> binding.editText.requestFocus()
+                KeyEvent.KEYCODE_DPAD_DOWN,
+                KeyEvent.KEYCODE_DPAD_RIGHT ->
+                    focusCenterColumn(view) ||
+                        focusHotColumn(view) ||
+                        focusKeyboardOrInput()
+                KeyEvent.KEYCODE_DPAD_UP -> true
+                KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_ENTER -> {
+                    toggleInputMode()
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    /**
+     * 在「虚拟键盘」与「系统输入法」之间切换，选择会被记住。
+     * 系统输入法模式下 EditText 允许拉起系统软键盘（可输入中文）。
+     */
+    private fun toggleInputMode() {
+        useSystemIme = !useSystemIme
+        appSettings.putBooleanAsync(KEY_USE_SYSTEM_IME, useSystemIme)
+        applyInputMode()
+        if (useSystemIme) {
+            focusInputBox()
+        } else {
+            binding.viewKeyboard.requestPrimaryFocus()
+        }
+        AppLog.i(TAG, "toggleInputMode useSystemIme=$useSystemIme")
+    }
+
+    private fun applyInputMode() {
+        binding.editText.showSoftInputOnFocus = useSystemIme
+        binding.buttonInputMode.setText(
+            if (useSystemIme) R.string.virtual_keyboard else R.string.system_input_method
+        )
+        if (!useSystemIme) {
+            hideSystemIme()
+        }
+    }
+
+    /** 系统输入法模式下优先把焦点交给输入框并拉起系统 IME。 */
+    private fun focusInputBox(anchorView: View? = null): Boolean {
+        if (!useSystemIme) {
+            return false
+        }
+        binding.editText.requestFocus()
+        binding.editText.post {
+            if (isAdded && view != null) {
+                showSystemIme()
+            }
+        }
+        return binding.editText.hasFocus()
+    }
+
+    private fun focusKeyboardOrInput(): Boolean {
+        return if (useSystemIme) {
+            binding.editText.requestFocus()
+        } else {
+            binding.viewKeyboard.requestPrimaryFocus()
+        }
+    }
+
+    private fun showSystemIme() {
+        val imm = context?.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            ?: return
+        imm.showSoftInput(binding.editText, InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    private fun hideSystemIme() {
+        val imm = context?.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            ?: return
+        val token = binding.editText.windowToken ?: return
+        imm.hideSoftInputFromWindow(token, 0)
     }
 
     private fun setupKeywordColumns() {
@@ -468,6 +567,7 @@ class SearchNewFragment :
     private fun showResultPanel() {
         isResultPanelVisible = true
         pendingResultFocus = true
+        hideSystemIme()
         binding.viewSearchResult.isVisible = true
         binding.layoutSearchInput.isVisible = false
         binding.viewKeyboard.isVisible = false
@@ -486,7 +586,7 @@ class SearchNewFragment :
         handleInputChanged(binding.editText.text?.toString().orEmpty(), requestSuggest = true)
         syncCenterColumn()
         binding.viewKeyboard.postDelayed({
-            if (isAdded && binding.viewKeyboard.isVisible) {
+            if (isAdded && binding.layoutSearchInput.isVisible) {
                 restoreSearchPanelFocus()
             }
         }, SEARCH_PANEL_FOCUS_DELAY_MS)
@@ -582,6 +682,7 @@ class SearchNewFragment :
     }
 
     override fun onPause() {
+        hideSystemIme()
         if (isResultPanelVisible) {
             val focused = binding.root.findFocus()
             AppLog.d(TAG, "onPause: isResultPanelVisible=true focused=${focused?.javaClass?.simpleName} focusedId=${focused?.id}")
@@ -630,6 +731,7 @@ class SearchNewFragment :
     }
 
     override fun onDestroyView() {
+        hideSystemIme()
         focusCoordinator.unregister(view)
         tabMediator?.detach()
         tabMediator = null
@@ -748,9 +850,10 @@ class SearchNewFragment :
     private fun restoreSearchPanelFocus(anchorView: View? = null): Boolean {
         return focusCoordinator.restoreSearchPanelFocus(
             anchorView = anchorView,
+            focusPrimary = ::focusInputBox,
             focusCenterColumn = ::focusCenterColumn,
             focusHotColumn = ::focusHotColumn,
-            focusKeyboard = binding.viewKeyboard::requestPrimaryFocus
+            focusKeyboard = ::focusKeyboardOrInput
         )
     }
 

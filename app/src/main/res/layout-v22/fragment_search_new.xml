@@ -44,6 +44,24 @@
             android:textSize="@dimen/px38"
             android:textStyle="bold"
             android:importantForAutofill="no"/>
+        <androidx.appcompat.widget.AppCompatTextView
+            android:id="@+id/button_input_mode"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="@dimen/px18"
+            android:background="@drawable/cell_background"
+            android:contentDescription="@string/switch_input_method"
+            android:focusable="true"
+            android:gravity="center"
+            android:paddingStart="@dimen/px15"
+            android:paddingTop="@dimen/px8"
+            android:paddingEnd="@dimen/px15"
+            android:paddingBottom="@dimen/px8"
+            android:singleLine="true"
+            android:text="@string/system_input_method"
+            android:textColor="?android:attr/textColorSecondary"
+            android:textSize="@dimen/px28"
+            android:textStyle="bold"/>
     </androidx.appcompat.widget.LinearLayoutCompat>
     <com.tutu.myblbl.feature.search.view.KeyboardView
         android:id="@+id/view_keyboard"
