@@ -254,6 +254,10 @@ dependencies {
     // GIF 支持（仅用于本地 animated drawable，~200KB）
     implementation("pl.droidsonroids.gif:android-gif-drawable:1.2.29")
 
+    // 汉字转拼音（动态页按关注账号昵称首字母筛选）
+    // 注：原定 tinypinyin 仅发布在已关闭的 JCenter，改用 Maven Central 上的 pinyin4j
+    implementation("com.belerweb:pinyin4j:2.5.1")
+
     // 协程
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 

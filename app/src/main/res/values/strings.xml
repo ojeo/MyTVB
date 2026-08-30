@@ -24,6 +24,10 @@
     <string name="allWeb">全站</string>
     <string name="all_dynamic">全部动态</string>
     <string name="all_series_title_format">%1$s · 全部</string>
+    <string name="dynamic_filter_default">筛选：全部</string>
+    <string name="dynamic_filter_summary">筛选：%1$s</string>
+    <string name="dynamic_filter_all">全部</string>
+    <string name="dynamic_filter_hint">输入关键词筛选关注账号（支持拼音/拼音首字母/数字）</string>
     <string name="allow_vip_colorful_dm">允许会员彩色弹幕</string>
     <string name="androidx_startup">androidx.startup</string>
     <string name="animation">番剧</string>

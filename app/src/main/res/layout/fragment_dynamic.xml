@@ -2,14 +2,43 @@
 <androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
+
+    <!-- 左栏顶部：首字母筛选入口 -->
+    <TextView
+        android:id="@+id/view_filter_bar"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:background="@drawable/list_background"
+        android:clickable="true"
+        android:focusable="true"
+        android:drawableStart="@drawable/ic_sort"
+        android:drawablePadding="@dimen/px8"
+        android:ellipsize="end"
+        android:gravity="center_vertical"
+        android:paddingStart="@dimen/px20"
+        android:paddingEnd="@dimen/px12"
+        android:paddingTop="@dimen/px16"
+        android:paddingBottom="@dimen/px16"
+        android:singleLine="true"
+        android:text="@string/dynamic_filter_default"
+        android:textColor="?android:attr/textColorPrimary"
+        android:textSize="@dimen/px24"
+        app:layout_constraintEnd_toStartOf="@+id/recyclerViewRight"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintWidth_percent="0.18" />
+
     <com.tutu.myblbl.core.ui.focus.VerticalFocusLockRecyclerView
         android:id="@+id/recyclerViewLeft"
         android:background="?attr/subBackgroundColor"
         android:layout_width="0dp"
-        android:layout_height="match_parent"
+        android:layout_height="0dp"
+        app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@+id/view_filter_bar"
         app:layout_constraintEnd_toStartOf="@+id/recyclerViewRight"
         app:layout_constraintWidth_percent="0.18"/>
+
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/recyclerViewRight"
         android:paddingLeft="@dimen/px20"
@@ -25,4 +54,81 @@
         app:layout_constraintStart_toEndOf="@+id/recyclerViewLeft"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintWidth_percent="0.82"/>
+
+    <!-- 关键词筛选输入区（非模态悬浮：不遮罩，左栏 UP 列表始终可见并实时刷新筛选结果） -->
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:id="@+id/panel_filter_input"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <!-- 键盘左缘锚点 = 左栏右侧（18%） -->
+        <androidx.constraintlayout.widget.Guideline
+            android:id="@+id/guideline_filter_left"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            app:layout_constraintGuide_percent="0.18" />
+
+        <!-- 悬浮键盘卡片：宽35%、高75%（参考搜索页键盘），从标题栏下方贴左栏右侧展开 -->
+        <androidx.constraintlayout.widget.ConstraintLayout
+            android:id="@+id/layout_filter_card"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:background="@drawable/filter_panel_bg"
+            android:paddingStart="@dimen/px24"
+            android:paddingTop="@dimen/px20"
+            android:paddingEnd="@dimen/px24"
+            android:paddingBottom="@dimen/px20"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintHeight_percent="0.75"
+            app:layout_constraintStart_toStartOf="@+id/guideline_filter_left"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintWidth_percent="0.35">
+
+            <androidx.appcompat.widget.AppCompatTextView
+                android:id="@+id/text_filter_panel_title"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:gravity="center"
+                android:singleLine="true"
+                android:text="@string/dynamic_filter_hint"
+                android:textColor="?android:attr/textColorPrimary"
+                android:textSize="@dimen/px26"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toTopOf="parent" />
+
+            <androidx.appcompat.widget.AppCompatTextView
+                android:id="@+id/text_filter_query"
+                android:layout_width="0dp"
+                android:layout_height="@dimen/px64"
+                android:layout_marginTop="@dimen/px16"
+                android:ellipsize="start"
+                android:gravity="center"
+                android:singleLine="true"
+                android:textColor="?android:attr/textColorPrimary"
+                android:textSize="@dimen/px32"
+                android:textStyle="bold"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toBottomOf="@+id/text_filter_panel_title" />
+
+            <com.tutu.myblbl.feature.search.view.KeyboardView
+                android:id="@+id/keyboard_filter"
+                android:clipChildren="false"
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:layout_marginTop="@dimen/px16"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toBottomOf="@+id/text_filter_query" />
+        </androidx.constraintlayout.widget.ConstraintLayout>
+    </androidx.constraintlayout.widget.ConstraintLayout>
 </androidx.constraintlayout.widget.ConstraintLayout>

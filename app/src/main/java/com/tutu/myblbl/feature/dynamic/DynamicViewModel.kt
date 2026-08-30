@@ -3,6 +3,7 @@ package com.tutu.myblbl.feature.dynamic
 import android.util.LruCache
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.tutu.myblbl.core.common.format.PinyinInitials
 import com.tutu.myblbl.model.user.FollowingModel
 import com.tutu.myblbl.model.video.VideoModel
 import com.tutu.myblbl.repository.UserRepository
@@ -38,10 +39,23 @@ class DynamicViewModel(
         private const val TAG = "DynamicVM"
         private const val ALL_DYNAMIC_ID = "0"
         private const val FOLLOWING_PAGE_SIZE = 50
+        /** 打开筛选面板时后台全量拉取关注列表的页数上限（50/页 → 最多 1000 人）。 */
+        private const val MAX_INDEX_PAGES = 20
     }
 
     private val _followingList = MutableStateFlow<List<FollowingModel>>(emptyList())
     val followingList: StateFlow<List<FollowingModel>> = _followingList.asStateFlow()
+
+    /** 当前关键词筛选（null 或空白 = 全部）。"全部动态"(mid=0) 不受筛选影响，始终保留置顶。 */
+    private val _filterQuery = MutableStateFlow<String?>(null)
+    val filterQuery: StateFlow<String?> = _filterQuery.asStateFlow()
+
+    /** mid → 搜索键缓存（原文/全拼/首字母），避免每次筛选重复做拼音转换。 */
+    private val searchKeyCache = LruCache<Long, List<String>>(1024)
+
+    /** 按当前筛选过滤后给 UI 的关注列表（含置顶的"全部动态"）。 */
+    private val _visibleFollowing = MutableStateFlow<List<FollowingModel>>(emptyList())
+    val visibleFollowing: StateFlow<List<FollowingModel>> = _visibleFollowing.asStateFlow()
 
     private val _videos = MutableStateFlow<List<VideoModel>>(emptyList())
     val videos: StateFlow<List<VideoModel>> = _videos.asStateFlow()
@@ -86,6 +100,9 @@ class DynamicViewModel(
     private var loadJob: Job? = null
     private var preloadJob: Job? = null
     private var followingLoadJob: Job? = null
+    private var followingIndexJob: Job? = null
+    private var followingIndexLoading = false
+    private var followingIndexReady = false
     private var lastPageSize = 20
     private var loadGeneration = 0
 
@@ -108,6 +125,7 @@ class DynamicViewModel(
             followingHasMore = false
             followingLoading = false
             loadedFollowingMidIds.clear()
+            resetLetterIndexState()
             _status.value = DynamicStatus.NotLoggedIn
             _screenState.value = ScreenState.NotLoggedIn
             return
@@ -125,6 +143,7 @@ class DynamicViewModel(
             followingHasMore = false
             followingLoading = false
             loadedFollowingMidIds.clear()
+            resetLetterIndexState()
 
             val defaultItems = listOf(
                 FollowingModel(
@@ -204,7 +223,10 @@ class DynamicViewModel(
     }
 
     fun loadMoreFollowingIfNeeded() {
-        if (currentUserMid <= 0L || !userRepository.isLoggedIn() || followingLoading || !followingHasMore) {
+        // 打开筛选面板触发的全量加载进行中/已完成时，不再滚动加载，避免重复请求
+        if (currentUserMid <= 0L || !userRepository.isLoggedIn() || followingLoading || !followingHasMore ||
+            followingIndexLoading || followingIndexReady
+        ) {
             return
         }
 
@@ -230,6 +252,7 @@ class DynamicViewModel(
                         followingHasMore = false
                     }
                     followingLoading = false
+                    rebuildVisibleFollowing()
                 }
                 .onFailure {
                     followingLoading = false
@@ -448,6 +471,7 @@ class DynamicViewModel(
             total > 0 -> loadedFollowingMidIds.size < total
             else -> uniqueItems.size >= FOLLOWING_PAGE_SIZE
         }
+        rebuildVisibleFollowing()
     }
 
     fun shouldRefresh(ttlMs: Long): Boolean {
@@ -462,12 +486,16 @@ class DynamicViewModel(
         loadJob?.cancel()
         preloadJob?.cancel()
         followingLoadJob?.cancel()
+        followingIndexJob?.cancel()
         videoCache.evictAll()
         AppLog.i(TAG, "onCleared: keep global ImageLoader memory cache, only clear dynamic page cache")
         _followingList.value = emptyList()
         _videos.value = emptyList()
         currentVideoItems = emptyList()
         loadedFollowingMidIds.clear()
+        _filterQuery.value = null
+        _visibleFollowing.value = emptyList()
+        searchKeyCache.evictAll()
     }
 
     private fun shouldLoadMoreFollowing(): Boolean {
@@ -475,5 +503,94 @@ class DynamicViewModel(
             followingTotal > 0 -> loadedFollowingMidIds.size < followingTotal
             else -> loadedFollowingMidIds.isNotEmpty() && loadedFollowingMidIds.size % FOLLOWING_PAGE_SIZE == 0
         }
+    }
+
+    /**
+     * 打开筛选面板时调用：后台串行把关注列表剩余页拉完（最多 MAX_INDEX_PAGES 页），
+     * 边拉边重建字母计数与可见列表。失败时静默降级为"只筛已加载部分"，不弹错误。
+     */
+    fun ensureAllFollowingLoaded() {
+        if (currentUserMid <= 0L || !userRepository.isLoggedIn()) return
+        if (followingIndexReady || followingIndexLoading) return
+        followingIndexLoading = true
+        followingIndexJob?.cancel()
+        followingIndexJob = viewModelScope.launch {
+            AppLog.i(TAG, "DYN I1 index full load start followingPage=$followingPage")
+            var page = followingPage
+            var continueLoop = followingHasMore
+            var pagesFetched = 0
+            while (continueLoop && pagesFetched < MAX_INDEX_PAGES) {
+                val nextPage = page + 1
+                userRepository.getFollowing(currentUserMid, nextPage, FOLLOWING_PAGE_SIZE)
+                    .onSuccess { response ->
+                        if (response.isSuccess) {
+                            val wrapper = response.data
+                            val pageItems = wrapper?.list.orEmpty()
+                            if (pageItems.isEmpty()) {
+                                continueLoop = false
+                                return@onSuccess
+                            }
+                            followingTotal = wrapper?.total ?: followingTotal
+                            val appendedItems = pageItems.filter { loadedFollowingMidIds.add(it.mid) }
+                            if (appendedItems.isNotEmpty()) {
+                                _followingList.value += appendedItems
+                            }
+                            followingPage = nextPage
+                            page = nextPage
+                            pagesFetched++
+                            continueLoop = shouldLoadMoreFollowing()
+                        } else {
+                            continueLoop = false
+                        }
+                    }
+                    .onFailure {
+                        continueLoop = false
+                    }
+            }
+            followingIndexLoading = false
+            followingIndexReady = true
+            rebuildVisibleFollowing()
+            AppLog.i(TAG, "DYN I2 index full load done pages=$pagesFetched listSize=${_followingList.value.size}")
+        }
+    }
+
+    /** 设置关键词筛选（null 或空白 = 全部），并重建可见列表。 */
+    fun applyFilterQuery(query: String?) {
+        _filterQuery.value = query?.trim()?.takeIf { it.isNotEmpty() }
+        rebuildVisibleFollowing()
+    }
+
+    /** 重置字母索引相关状态（换账号 / 重新加载时调用）。 */
+    private fun resetLetterIndexState() {
+        followingIndexJob?.cancel()
+        followingIndexJob = null
+        followingIndexLoading = false
+        followingIndexReady = false
+        _filterQuery.value = null
+        _visibleFollowing.value = emptyList()
+        searchKeyCache.evictAll()
+    }
+
+    /** 按当前关键词重建可见关注列表；"全部动态"(mid=0) 不受筛选影响，始终置顶。 */
+    private fun rebuildVisibleFollowing() {
+        val query = _filterQuery.value
+        val all = _followingList.value
+        val visible = if (query.isNullOrEmpty()) {
+            all
+        } else {
+            val lowerQuery = query.lowercase()
+            all.filter { item ->
+                item.mid == 0L || matchesQuery(item, lowerQuery)
+            }
+        }
+        _visibleFollowing.value = visible
+    }
+
+    /** 关键词模糊匹配：昵称原文 / 拼音全拼 / 拼音首字母 任一包含 query 即命中。 */
+    private fun matchesQuery(item: FollowingModel, lowerQuery: String): Boolean {
+        val keys = searchKeyCache.get(item.mid) ?: PinyinInitials.searchKeysOf(item.uname).also {
+            searchKeyCache.put(item.mid, it)
+        }
+        return keys.any { it.contains(lowerQuery) }
     }
 }

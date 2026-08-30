@@ -19,6 +19,7 @@ import com.tutu.myblbl.model.user.FollowingModel
 import com.tutu.myblbl.model.video.VideoModel
 import com.tutu.myblbl.network.session.NetworkSessionGateway
 import com.tutu.myblbl.core.ui.base.BaseFragment
+import com.tutu.myblbl.core.ui.base.OnBackPressedHandler
 import com.tutu.myblbl.core.ui.base.RecyclerViewPoolPrewarmer
 import com.tutu.myblbl.core.ui.base.VideoRecyclerViewTuning
 import android.os.SystemClock
@@ -39,6 +40,7 @@ import com.tutu.myblbl.core.ui.focus.tv.TvListFocusController
 import com.tutu.myblbl.core.ui.refresh.SwipeRefreshHelper
 import com.tutu.myblbl.core.navigation.VideoRouteNavigator
 import com.tutu.myblbl.core.ui.render.FirstScreenRenderer
+import com.tutu.myblbl.feature.search.view.KeyboardView
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -46,10 +48,15 @@ import kotlinx.coroutines.withContext
 import org.koin.android.ext.android.inject
 import org.koin.androidx.viewmodel.ext.android.viewModel
 
-class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarget, com.tutu.myblbl.ui.activity.MainActivity.OnVideoBlockedListener {
+class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarget,
+    com.tutu.myblbl.ui.activity.MainActivity.OnVideoBlockedListener,
+    OnBackPressedHandler,
+    KeyboardView.KeySelectListener {
     private enum class ContentFocusTarget {
         LEFT_UP_LIST,
-        RIGHT_VIDEO_LIST
+        RIGHT_VIDEO_LIST,
+        FILTER_BAR,
+        FILTER_INPUT
     }
 
     companion object {
@@ -67,6 +74,7 @@ class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarg
     private lateinit var videoAdapter: DynamicVideoAdapter
     private var swipeRefreshLayout: androidx.swiperefreshlayout.widget.SwipeRefreshLayout? = null
     private var currentUpId: Long = 0L
+    private var filterInputOpen = false
     private val pageSize = 20
     private val loadMoreThreshold = 12
     private var latestStatus: DynamicViewModel.DynamicStatus = DynamicViewModel.DynamicStatus.Idle
@@ -94,6 +102,105 @@ class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarg
     override fun initView() {
         setupUpList()
         setupVideoList()
+        setupFilterBar()
+        setupFilterInput()
+    }
+
+    private fun setupFilterBar() {
+        binding.viewFilterBar.setOnClickListener { openFilterInput() }
+        binding.viewFilterBar.setOnFocusChangeListener { _, hasFocus ->
+            if (hasFocus) {
+                preferredContentFocusTarget = ContentFocusTarget.FILTER_BAR
+            }
+        }
+    }
+
+    private fun setupFilterInput() {
+        binding.keyboardFilter.setKeySelectListener(this)
+        binding.keyboardFilter.setDispatchKeyDel(true)
+    }
+
+    private fun openFilterInput() {
+        if (filterInputOpen || !isAdded) return
+        filterInputOpen = true
+        preferredContentFocusTarget = ContentFocusTarget.FILTER_INPUT
+        // 打开面板时触发后台全量拉取关注列表（若尚未拉完），保证筛选完整
+        viewModel.ensureAllFollowingLoaded()
+        syncFilterQueryText()
+        binding.panelFilterInput.visibility = View.VISIBLE
+        // 等待布局完成后再请求键盘焦点（KeyboardView 需构建 header/键盘/页脚）
+        binding.keyboardFilter.post { binding.keyboardFilter.requestPrimaryFocus() }
+    }
+
+    private fun closeFilterInput(restoreFilterBarFocus: Boolean = true) {
+        if (!filterInputOpen) return
+        filterInputOpen = false
+        binding.panelFilterInput.visibility = View.GONE
+        preferredContentFocusTarget = ContentFocusTarget.FILTER_BAR
+        if (restoreFilterBarFocus) {
+            binding.viewFilterBar.post {
+                if (isAdded && view != null && !filterInputOpen) {
+                    binding.viewFilterBar.requestFocus()
+                }
+            }
+        }
+    }
+
+    private fun applyFilterQuery(query: String?) {
+        viewModel.applyFilterQuery(query)
+        syncFilterQueryText()
+        updateFilterBarText()
+    }
+
+    private fun syncFilterQueryText() {
+        binding.textFilterQuery.text = viewModel.filterQuery.value.orEmpty()
+    }
+
+    private fun updateFilterBarText() {
+        val query = viewModel.filterQuery.value
+        val label = if (query.isNullOrEmpty()) {
+            requireContext().getString(R.string.dynamic_filter_all)
+        } else {
+            query
+        }
+        binding.viewFilterBar.text =
+            requireContext().getString(R.string.dynamic_filter_summary, label)
+    }
+
+    private fun focusFilterBar(): Boolean {
+        if (!isAdded || view == null) return false
+        return binding.viewFilterBar.requestFocus()
+    }
+
+    // ---- KeyboardView.KeySelectListener ----
+
+    override fun onInsertText(text: String) {
+        val current = viewModel.filterQuery.value.orEmpty()
+        applyFilterQuery(current + text)
+    }
+
+    override fun onDelete() {
+        val current = viewModel.filterQuery.value.orEmpty()
+        if (current.isNotEmpty()) {
+            applyFilterQuery(current.dropLast(1))
+        }
+    }
+
+    override fun onClear() {
+        applyFilterQuery(null)
+    }
+
+    override fun onSearch() {
+        closeFilterInput()
+    }
+
+    /** 面板开启时拦截返回键；否则交由 MainActivity 走常规返回流程。 */
+    override fun onBackPressed(): Boolean {
+        if (filterInputOpen) {
+            closeFilterInput()
+            return true
+        }
+        return false
     }
 
     override fun onRetryClick() {
@@ -174,6 +281,10 @@ class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarg
     }
 
     private fun onUpClick(up: FollowingModel) {
+        // 键盘筛选面板开启时，选中账号后收起键盘，焦点留在左栏
+        if (filterInputOpen) {
+            closeFilterInput(restoreFilterBarFocus = false)
+        }
         val clickedPosition = upAdapter.getData().indexOfFirst { it.mid == up.mid }
         val wasSelected = clickedPosition >= 0 &&
             clickedPosition == upAdapter.getSelectedPosition() &&
@@ -241,6 +352,11 @@ class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarg
             PagePerfLogger.markNow("Dynamic", "skip_duplicate_initial_request")
             return
         }
+        // 关注列表重新加载时回到"全部"筛选
+        if (viewModel.filterQuery.value?.isNotEmpty() == true) {
+            viewModel.applyFilterQuery(null)
+            updateFilterBarText()
+        }
         latestVideoRequestStartMs = nowMs
         if (currentUpId == 0L) {
             latestInitialRequestStartMs = nowMs
@@ -287,12 +403,23 @@ class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarg
     override fun initObserver() {
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                viewModel.followingList.collectLatest { list ->
-                    AppLog.i(TAG, "DYN D7 followingList collected items=${list.size}")
+                viewModel.visibleFollowing.collectLatest { list ->
+                    AppLog.i(TAG, "DYN D7 visibleFollowing collected items=${list.size} filter=${viewModel.filterQuery.value}")
                     upAdapter.setData(list)
-                    if (list.isNotEmpty() && currentUpId == 0L) {
+                    if (list.isEmpty()) {
+                        return@collectLatest
+                    }
+                    if (currentUpId == 0L) {
+                        // 首次加载/重置：选中置顶的"全部动态"
                         currentUpId = list[0].mid
                         upAdapter.setSelectedPosition(0)
+                        viewModel.selectUp(currentUpId.toString(), pageSize)
+                    } else if (list.none { it.mid == currentUpId }) {
+                        // 关键词筛选生效后，当前 UP 被过滤：自动切到首个真实 UP（无则回"全部动态"）
+                        val target = list.firstOrNull { it.mid != 0L } ?: list.first()
+                        currentUpId = target.mid
+                        val targetPosition = list.indexOfFirst { it.mid == target.mid }
+                        upAdapter.setSelectedPosition(targetPosition)
                         viewModel.selectUp(currentUpId.toString(), pageSize)
                     }
                 }
@@ -671,6 +798,18 @@ class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarg
                             return true
                         }
                     }
+
+                    anchorView.isDescendantOf(binding.viewFilterBar) -> {
+                        if (focusSelectedUpItem()) {
+                            return true
+                        }
+                    }
+
+                    anchorView.isDescendantOf(binding.panelFilterInput) -> {
+                        if (binding.keyboardFilter.requestPrimaryFocus()) {
+                            return true
+                        }
+                    }
                 }
             }
             val handled = SpatialFocusNavigator.requestBestDescendant(
@@ -694,6 +833,10 @@ class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarg
     override fun onHiddenChanged(hidden: Boolean) {
         super.onHiddenChanged(hidden)
         if (!hidden) {
+            if (filterInputOpen) {
+                binding.keyboardFilter.requestPrimaryFocus()
+                return
+            }
             val currentFocusedView = activity?.currentFocus
             if (currentFocusedView != null &&
                 currentFocusedView !== binding.recyclerViewRight &&
@@ -765,6 +908,22 @@ class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarg
                     true
                 } else {
                     fallbackToAlternate && focusRightContent()
+                }
+            }
+
+            ContentFocusTarget.FILTER_BAR -> {
+                if (focusFilterBar()) {
+                    true
+                } else {
+                    fallbackToAlternate && focusSelectedUpItem()
+                }
+            }
+
+            ContentFocusTarget.FILTER_INPUT -> {
+                if (filterInputOpen && binding.keyboardFilter.requestPrimaryFocus()) {
+                    true
+                } else {
+                    fallbackToAlternate && focusFilterBar()
                 }
             }
         }
@@ -852,6 +1011,7 @@ class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarg
     override fun onDestroyView() {
         videoFocusController?.release()
         videoFocusController = null
+        filterInputOpen = false
         super.onDestroyView()
     }
 

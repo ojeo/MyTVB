@@ -88,6 +88,10 @@ class MyBLBLApplication : Application() {
             trace("initKoin", startMs) { initKoin() }
             trace("startSettingsCacheAsync", startMs) { startSettingsCacheAsync() }
             trace("initBackgroundMonitor", startMs) { AppBackgroundMonitor.init(this) }
+            // 后台预热 tinypinyin 拼音字典表，避免首次进入动态页做首字母分组时卡顿
+            appScope.launch {
+                com.tutu.myblbl.core.common.format.PinyinInitials.warmUp()
+            }
             uiRuntimeReady.set(true)
             AppLog.i(TAG, "STARTUP uiRuntimeInit end reason=$reason elapsed=${SystemClock.elapsedRealtime() - startMs}ms")
         }
