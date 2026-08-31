@@ -14,7 +14,7 @@ import androidx.lifecycle.lifecycleScope
 import com.tutu.myblbl.R
 import com.tutu.myblbl.core.common.log.AppLog
 import com.tutu.myblbl.network.security.NetworkWebGateway
-import com.tutu.myblbl.network.session.NetworkSessionGateway
+import com.tutu.myblbl.network.session.SessionStateRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -25,7 +25,7 @@ class GaiaVgateActivity : AppCompatActivity() {
 
     private lateinit var status: TextView
     private lateinit var webView: WebView
-    private val sessionGateway: NetworkSessionGateway by inject()
+    private val sessionGateway: SessionStateRepository by inject()
     private val webGateway: NetworkWebGateway by inject()
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -198,7 +198,7 @@ private data class GaiaVgateRegisterResult(
 
 private suspend fun gaiaVgateRegister(
     vVoucher: String,
-    sessionGateway: NetworkSessionGateway,
+    sessionGateway: SessionStateRepository,
     webGateway: NetworkWebGateway
 ): GaiaVgateRegisterResult {
     val csrf = sessionGateway.getCsrfToken()
@@ -232,7 +232,7 @@ private suspend fun gaiaVgateValidate(
     geetestChallenge: String,
     validate: String,
     seccode: String,
-    sessionGateway: NetworkSessionGateway,
+    sessionGateway: SessionStateRepository,
     webGateway: NetworkWebGateway
 ): String {
     val csrf = sessionGateway.getCsrfToken()

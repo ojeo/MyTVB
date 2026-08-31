@@ -126,7 +126,7 @@ class RecommendFeedRepository(
         val cached = HomeCacheStore.readCachedVideos(CACHE_KEY)
         AppLog.i(
             TAG,
-            "APP_STARTUP recommend cache read end elapsed=${SystemClock.elapsedRealtime() - startMs}ms count=${cached.items.size} ageMs=${formatCacheAge(cached.savedAtMs)} schema=${cached.schemaVersion}"
+            "APP_STARTUP recommend cache read end elapsed=${SystemClock.elapsedRealtime() - startMs}ms count=${cached.items.size} ageMs=${HomeCacheStore.cacheAgeMs(cached.savedAtMs)} schema=${cached.schemaVersion}"
         )
         return CachedFeed(
             items = cached.items.take(MAX_CACHED_RECOMMEND_ITEMS),
@@ -142,6 +142,17 @@ class RecommendFeedRepository(
         fetchRow: Int
     ): Result<NetworkPage> = runCatching {
         loadWebFeedPage(page, pageSize, freshIdx, fetchRow)
+    }
+
+    /**
+     * 首页刷新成功后同步内存预加载缓存。切 tab 回来会重建 Fragment 并走
+     * loadSharedFirstPage 优先吃 preloadedFirstPage；若不更新，用户刚刷出来的
+     * 新内容会被启动时的旧首页顶掉（重新登录后复现：刷新→切走→切回变旧数据）。
+     */
+    fun updatePreloadedFirstPage(page: NetworkPage) {
+        if (page.items.isEmpty()) return
+        AppLog.i(TAG, "updatePreloadedFirstPage items=${page.items.size} source=${page.source}")
+        preloadedFirstPage = page
     }
 
     private suspend fun loadWebFeedPage(
@@ -206,11 +217,4 @@ class RecommendFeedRepository(
         return items.take(MAX_CACHED_RECOMMEND_ITEMS)
     }
 
-    private fun formatCacheAge(savedAtMs: Long): Long {
-        return if (savedAtMs > 0L) {
-            System.currentTimeMillis() - savedAtMs
-        } else {
-            -1L
-        }
-    }
 }

@@ -14,7 +14,7 @@ import com.tutu.myblbl.core.ui.focus.RecyclerViewLoadMoreFocusController
 import com.tutu.myblbl.core.ui.layout.WrapContentGridLayoutManager
 import com.tutu.myblbl.databinding.DialogMyFollowingBinding
 import com.tutu.myblbl.model.series.SeriesModel
-import com.tutu.myblbl.network.session.NetworkSessionGateway
+import com.tutu.myblbl.network.session.SessionStateRepository
 import com.tutu.myblbl.repository.SeriesRepository
 import com.tutu.myblbl.repository.UserRepository
 import com.tutu.myblbl.ui.adapter.SeriesAdapter
@@ -42,7 +42,7 @@ class MyFollowingDialog(
     private val binding = DialogMyFollowingBinding.inflate(LayoutInflater.from(context))
     private val repository: SeriesRepository by inject()
     private val userRepository: UserRepository by inject()
-    private val sessionGateway: NetworkSessionGateway by inject()
+    private val sessionGateway: SessionStateRepository by inject()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val adapter = SeriesAdapter(
         onItemClick = { series ->

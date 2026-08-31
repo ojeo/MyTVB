@@ -12,6 +12,7 @@ import com.tutu.myblbl.network.security.NetworkSecurityGateway
 import com.tutu.myblbl.network.security.NetworkWebGateway
 import com.tutu.myblbl.network.session.NetworkManagerSessionGateway
 import com.tutu.myblbl.network.session.NetworkSessionGateway
+import com.tutu.myblbl.network.session.SessionStateRepository
 import com.tutu.myblbl.repository.AllSeriesRepository
 import com.tutu.myblbl.repository.AuthRepository
 import com.tutu.myblbl.repository.FavoriteRepository
@@ -56,7 +57,9 @@ val networkModule = module {
     single<ApiService> { NetworkManager.apiService }
     single<OkHttpClient> { NetworkManager.getOkHttpClient() }
     single<CookieManager> { NetworkManager.getCookieManager() }
+    // 同一实例绑定双接口：Repository/播放内核用 NetworkSessionGateway，UI 层只注入 SessionStateRepository
     single<NetworkSessionGateway> { NetworkManagerSessionGateway() }
+    single<SessionStateRepository> { get<NetworkSessionGateway>() as SessionStateRepository }
     single<NetworkSecurityGateway> { NetworkManagerSecurityGateway() }
     single<NetworkWebGateway> { NetworkManagerWebGateway() }
     factory(named("noCookie")) { NetworkManager.noCookieApiService }

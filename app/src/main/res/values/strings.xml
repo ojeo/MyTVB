@@ -362,6 +362,7 @@
 
     <string name="negative_sequence">倒序</string>
     <string name="net_error">服务器开小差了，要重试吗？</string>
+    <string name="net_unavailable">网络连接不可用，请检查电视网络后重试</string>
     <string name="new_series_update">新番更新表</string>
     <string name="next">接下来：</string>
     <string name="next_ep">下一集</string>
@@ -479,4 +480,5 @@
     <string name="episode_no_next">已是最后一集</string>
     <string name="category_entry_disabled">分类入口已关闭</string>
     <string name="cctv_live_entry_disabled">电视直播入口已关闭</string>
+    <string name="teen_rest_countdown">还需休息 %1$02d:%2$02d</string>
 </resources>

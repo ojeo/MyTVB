@@ -1,5 +1,6 @@
 package com.tutu.myblbl.ui.activity
 
+import com.tutu.myblbl.core.common.json.GsonHolder
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
@@ -86,7 +87,7 @@ class MarmotLiveActivity : BaseActivity<ActivityMarmotLiveBinding>() {
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val gson = Gson()
+    private val gson = GsonHolder.DEFAULT
 
     /** 青少年模式：直播期间每 15 秒结算观看时长，达上限触发休息退出。 */
     private val teenModeTicker = object : Runnable {
@@ -270,34 +271,37 @@ class MarmotLiveActivity : BaseActivity<ActivityMarmotLiveBinding>() {
                 return@launch
             }
             provinces.clear()
-            // 【放开全部频道】不再按 CCTV 过滤，直接用 tv2.json 全量频道（央视/央视源2/卫视/各省台/地市台等）。
-            // 播放链路统一走 playCurrent：CCTV（tv.cctv.com/live/）用 createLivePlayer 原生播放，
-            // 其它源用 Marmot 整页劫持（loadUrl + tv.user.js 注入 + 对应站点 detail.js）。
-            // 注意：当前是「全放开」状态，用于逐个站点实测哪些源能正常出流，实测后再收敛为白名单/分级。
+            // 方案 C（CCTV 优先）：只保留能用 createLivePlayer 播放的 CCTV 频道
+            // （url 含 tv.cctv.com/live/）。省台/央视频等暂不显示（后续逐站点维护再加）。
+            // PR #53 曾在此「放开全部频道」，属贡献者自述的逐站点实测状态，暂不采纳，
+            // 待实测收敛为白名单后再放开；下方 playCurrent 的 Marmot 整页劫持分支与
+            // 全黑遮罩机制保留，为后续放开做预留。
             val allLives = MarmotLiveData.getLives()
-            var liveIndex = 0
+            var cctvIndex = 0
             for (live in allLives) {
-                if (live.vods.isEmpty()) continue
-                // 构造分组副本（重新编 tagIndex/detailIndex）
-                val filteredLive = Live(tag = live.tag, name = live.name, index = liveIndex,
-                    vods = live.vods.toMutableList())
-                live.vods.forEachIndexed { j, vod ->
-                    vod.tagIndex = liveIndex
+                // 筛选该分组下 url 是 tv.cctv.com/live/ 的频道，重建 Vod 的导航索引
+                val cctvVods = live.vods.filter { extractCctvChannelId(it.url) != null }
+                if (cctvVods.isEmpty()) continue
+                // 构造只含 CCTV 频道的分组副本（重新编 tagIndex/detailIndex）
+                val filteredLive = Live(tag = live.tag, name = live.name, index = cctvIndex,
+                    vods = cctvVods.toMutableList())
+                cctvVods.forEachIndexed { j, vod ->
+                    vod.tagIndex = cctvIndex
                     vod.detailIndex = j
-                    vod.key = "${liveIndex}_$j"
+                    vod.key = "${cctvIndex}_$j"
                 }
                 provinces.add(filteredLive)
-                liveIndex++
+                cctvIndex++
             }
-            AppLog.i(TAG, "initData: 全量频道 ${provinces.size} 个分组，" +
+            AppLog.i(TAG, "initData: CCTV 频道过滤后 ${provinces.size} 个分组，" +
                 "${provinces.sumOf { it.vods.size }} 个频道")
             if (provinces.isEmpty()) {
-                Toast.makeText(this@MarmotLiveActivity, "无频道数据", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MarmotLiveActivity, "无 CCTV 频道数据", Toast.LENGTH_SHORT).show()
                 return@launch
             }
-            // 3. 恢复上次观看频道：优先按保存的 URL 反查（任意源），否则回退首频道
+            // 3. 恢复上次观看频道：优先按保存的 URL 反查（必须是 CCTV 频道），否则回退首个 CCTV 频道
             val lastUrl = appSettings.getCachedString(KEY_LAST_CHANNEL_URL, null)
-            currentVod = if (!lastUrl.isNullOrEmpty()) {
+            currentVod = if (!lastUrl.isNullOrEmpty() && extractCctvChannelId(lastUrl) != null) {
                 provinces.flatMap { it.vods }.firstOrNull { it.url == lastUrl }
                     ?: provinces.first().vods.first()
             } else {

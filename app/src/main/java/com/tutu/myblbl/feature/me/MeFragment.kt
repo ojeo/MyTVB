@@ -16,7 +16,7 @@ import com.google.android.material.tabs.TabLayoutMediator
 import com.tutu.myblbl.R
 import com.tutu.myblbl.databinding.FragmentMeBinding
 import com.tutu.myblbl.event.AppEventHub
-import com.tutu.myblbl.network.session.NetworkSessionGateway
+import com.tutu.myblbl.network.session.SessionStateRepository
 import com.tutu.myblbl.core.ui.base.BaseFragment
 import com.tutu.myblbl.ui.fragment.main.MainNavigationViewModel
 import com.tutu.myblbl.ui.fragment.main.MainTabFocusTarget
@@ -40,7 +40,7 @@ class MeFragment : BaseFragment<FragmentMeBinding>(), MainTabFocusTarget {
     private val appSettings: AppSettingsDataStore by inject()
     private val appEventHub: AppEventHub by inject()
     private val mainNavigationViewModel: MainNavigationViewModel by activityViewModels()
-    private val sessionGateway: NetworkSessionGateway by inject()
+    private val sessionGateway: SessionStateRepository by inject()
     private val viewModel: MeViewModel by viewModel()
     private lateinit var tabLayout: TabLayout
     private lateinit var viewPager: ViewPager2

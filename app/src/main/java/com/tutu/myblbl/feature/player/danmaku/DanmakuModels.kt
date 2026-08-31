@@ -31,8 +31,8 @@ enum class DanmakuLaneDensity(
 }
 
 /**
- * 弹幕行间距档位。两套引擎（akdanmaku 功能优先 + lite 性能优先）共用同一 [factor]
- * 作为行高倍率，统一算法：行间空白 = 度量高度 × (factor - 1)。
+ * 弹幕行间距档位。[factor] 为行高倍率，统一算法：行间空白 = 度量高度 × (factor - 1)
+ * （与已移除的 akdanmaku 引擎 margin 语义对齐）。
  *
  * factor 基准为 fontMetrics 度量高度（descent-ascent，含字体设计留白），故：
  * - factor = 1.0 → 度量层零空白（但字形间仍有 fontMetrics 内部留白，视觉略松）
@@ -45,7 +45,7 @@ enum class DanmakuTrackSpacing(
     val prefValue: String,
     /** 设置页显示名。 */
     val displayName: String,
-    /** 行高倍率。laneHeight = textBoxHeight × factor；akdanmaku margin = itemHeight × (factor - 1)。 */
+    /** 行高倍率。laneHeight = textBoxHeight × factor（akdanmaku 遗留语义：margin = itemHeight × (factor - 1)）。 */
     val factor: Float,
 ) {
     Compact("compact", "紧凑", 0.80f),
@@ -105,6 +105,8 @@ data class DanmakuConfig(
     val area: Float,
     val laneDensity: DanmakuLaneDensity,
     val trackSpacing: DanmakuTrackSpacing = DanmakuTrackSpacing.DEFAULT,
+    /** 同屏弹幕数上限（并发渲染性能约束；满员即弃、不排队）。0 = 自适应：下限 100、按渲染帧率自动增减（初始 TV 100 / 其他 160）。 */
+    val maxOnScreen: Int = 0,
 )
 
 data class DanmakuSessionSettings(

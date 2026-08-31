@@ -14,7 +14,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.tutu.myblbl.R
 import com.tutu.myblbl.databinding.FragmentFavoriteBinding
 import com.tutu.myblbl.event.AppEventHub
-import com.tutu.myblbl.network.session.NetworkSessionGateway
+import com.tutu.myblbl.network.session.SessionStateRepository
 import com.tutu.myblbl.repository.UserRepository
 import com.tutu.myblbl.repository.FavoriteRepository
 import com.tutu.myblbl.ui.adapter.FavoriteFolderAdapter
@@ -53,7 +53,7 @@ class FavoriteFragment : BaseFragment<FragmentFavoriteBinding>(), MeTabPage {
     }
 
     private val appEventHub: AppEventHub by inject()
-    private val sessionGateway: NetworkSessionGateway by inject()
+    private val sessionGateway: SessionStateRepository by inject()
     private val favoriteRepository: FavoriteRepository by inject()
     private val userRepository: UserRepository by inject()
     private lateinit var adapter: FavoriteFolderAdapter

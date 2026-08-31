@@ -50,10 +50,15 @@ internal class CacheManager(
         private const val MSG_BUILD_CACHE = 2001
         private const val MSG_CLEAR = 2002
         private const val MSG_RELEASE = 2099
+        private const val MSG_FLUSH_RELEASED = 2003
 
         private const val CACHE_POOL_MAX_COUNT: Int = 72
 
-        private const val MAX_RELEASE_PER_DRAIN = 24
+        // 洪峰段快照每帧重建、每次 lease ~同屏数条引用：acquire 可达 ~8500/s（50fps×170），
+        // 本 drain 是唯一的释放出口——24/帧（1200/s）会让释放持续欠账数十万条，
+        // 旧位图 refcount 永远 >0 → 预算无法回收 → 建图失败 → 弹幕变稀。
+        // 单条出队成本极低（重活由 cache 线程在 MSG_FLUSH_RELEASED 执行），放大到 256/帧。
+        private const val MAX_RELEASE_PER_DRAIN = 256
         private const val MAX_SHARED_CACHE = 256
 
         // FNV-1a 64-bit（与 akdanmaku sharedCacheKey 同算法）
@@ -94,6 +99,7 @@ internal class CacheManager(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, SharedCacheEntry>?): Boolean {
             if (size <= MAX_SHARED_CACHE) return false
             eldest?.value?.let { entry ->
+                sharedTableSize.decrementAndGet()
                 // 释放共享表持有的那份引用。若此时已无 item 引用，bitmap 立刻可回收；
                 // 若仍有 item 在用，bitmap 等最后一个 item release 时才回收。
                 if (entry.release()) {
@@ -104,6 +110,11 @@ internal class CacheManager(
         }
     }
     private var sharedCacheGeneration = -1
+
+    // 共享表条目数近似值（仅诊断用：cache 线程写、主线程读）。
+    private val sharedTableSize = java.util.concurrent.atomic.AtomicInteger(0)
+    private var lastBudgetLogMs = 0L
+    private var buildCounter = 0
     private val sharedHit = AtomicLong(0L)
 
     private val queueDepth = AtomicInteger(0)
@@ -147,7 +158,8 @@ internal class CacheManager(
 
     fun statsSnapshot(): StatsSnapshot {
         val budget = bitmapBudget.snapshot()
-        return StatsSnapshot(
+        val poolSnap = pool.snapshot()
+        val snapshot = StatsSnapshot(
             bitmapCreated = bitmapCreated.get(),
             bitmapReused = bitmapReused.get(),
             bitmapPutToPool = bitmapPutToPool.get(),
@@ -156,7 +168,25 @@ internal class CacheManager(
             bitmapBytes = budget.usedBytes,
             bitmapMaxBytes = budget.maxBytes,
             bitmapCount = budget.bitmapCount,
+            sharedTableSize = sharedTableSize.get(),
         )
+        // 预算水位诊断（30s 限频）：定位"预算耗尽 → 建图失败 → 弹幕变稀"时
+        // 36MB 到底被谁占着——表内条目 / 池 / 在外引用（item+快照 lease）。
+        val nowMs = android.os.SystemClock.elapsedRealtime()
+        if (budget.usedBytes * 10L >= budget.maxBytes * 9L && nowMs - lastBudgetLogMs >= 30_000L) {
+            lastBudgetLogMs = nowMs
+            AppLog.w(
+                TAG,
+                "budget HIGH used=${budget.usedBytes / 1024}KB/${budget.maxBytes / 1024}KB " +
+                    "count=${budget.bitmapCount} table=${snapshot.sharedTableSize} " +
+                    "poolBytes=${poolSnap.bytes / 1024}KB poolCount=${poolSnap.count} " +
+                    "queue=${queueDepth.get()} created=${bitmapCreated.get()} recycled=${bitmapRecycled.get()} " +
+                    "putToPool=${bitmapPutToPool.get()} " +
+                    "refs=${SharedCacheEntry.acquiredTotal.get() - SharedCacheEntry.releasedTotal.get()} " +
+                    "(+${SharedCacheEntry.acquiredTotal.get()}/-${SharedCacheEntry.releasedTotal.get()})"
+            )
+        }
+        return snapshot
     }
 
     fun requestBuildCache(
@@ -177,6 +207,16 @@ internal class CacheManager(
         }
     }
 
+    /**
+     * 延迟回收队列：主线程（drainReleasedBitmaps）只做出队并转投本队列，
+     * 真正的 pool 归还/bitmap.recycle()（触发 NativeAllocationRegistry 与驱动侧纹理释放，
+     * 突发时可达每帧 24 条）由 cache 线程在 MSG_FLUSH_RELEASED 中执行，避免顶到 vsync。
+     * recycleFlushPosted 去重：同时最多挂起一个 flush 消息。
+     */
+    private val recycleLock = Any()
+    private val recycleQueue = ArrayDeque<SharedCacheEntry>()
+    private val recycleFlushPosted = java.util.concurrent.atomic.AtomicBoolean(false)
+
     fun drainReleasedBitmaps(currentFrameId: Int) {
         var drained = 0
         // 溢出队列持有更早的条目：非空时优先处理，其头部若未到期则环形队列同样等待。
@@ -192,6 +232,24 @@ internal class CacheManager(
                     releaseRing.pollEntry() ?: break
                 }
             drained++
+            synchronized(recycleLock) { recycleQueue.addLast(entry) }
+        }
+        if (drained > 0) flushRecycleQueueAsync()
+    }
+
+    private fun flushRecycleQueueAsync() {
+        if (!recycleFlushPosted.compareAndSet(false, true)) return
+        val sent = runCatching { handler.sendEmptyMessage(MSG_FLUSH_RELEASED) }.isSuccess
+        if (!sent) {
+            // cache 线程已退出（release 后的迟到 drain）：主线程兜底同步回收。
+            recycleFlushPosted.set(false)
+            flushRecycleQueueSync()
+        }
+    }
+
+    private fun flushRecycleQueueSync() {
+        while (true) {
+            val entry = synchronized(recycleLock) { recycleQueue.removeFirstOrNull() } ?: break
             processReleasedEntry(entry)
         }
     }
@@ -229,17 +287,29 @@ internal class CacheManager(
                     queueDepth.decrementAndGet()
                     buildCache(req)
                 }
+                MSG_FLUSH_RELEASED -> {
+                    recycleFlushPosted.set(false)
+                    flushRecycleQueueSync()
+                    // drain 与本消息竞态新入队：再挂一个 flush 兜底。
+                    if (synchronized(recycleLock) { recycleQueue.isNotEmpty() }) {
+                        flushRecycleQueueAsync()
+                    }
+                }
                 MSG_CLEAR -> {
+                    recycleFlushPosted.set(false)
                     queueDepth.set(0)
                     clearSharedCacheStore()
                     releaseAllPendingEntries()
+                    flushRecycleQueueSync()
                     pool.clear()
                 }
                 MSG_RELEASE -> {
                     removeCallbacksAndMessages(null)
+                    recycleFlushPosted.set(false)
                     queueDepth.set(0)
                     clearSharedCacheStore()
                     releaseAllPendingEntries()
+                    flushRecycleQueueSync()
                     pool.clear()
                     runCatching { thread.quitSafely() }
                 }
@@ -286,6 +356,7 @@ internal class CacheManager(
         // 命中失败（bitmap 已回收）时剔除脏条目。
         if (shared != null) {
             sharedCacheStore.remove(key)
+            sharedTableSize.decrementAndGet()
             if (shared.release()) {
                 recycleBitmap(shared.bitmap)
             }
@@ -359,7 +430,9 @@ internal class CacheManager(
         // 构建完成后只由共享表持有。Action 线程接收结果时再申请 item 引用。
         val entry = SharedCacheEntry(bmp)
         entry.acquire()
+        if (sharedCacheStore[key] == null) sharedTableSize.incrementAndGet()
         sharedCacheStore[key] = entry
+        enforceSharedCacheBound()
         publishResult(req, entry)
     }
 
@@ -376,10 +449,40 @@ internal class CacheManager(
         if (sharedCacheStore.isEmpty()) return
         val entries = sharedCacheStore.values.toList()
         sharedCacheStore.clear()
+        sharedTableSize.set(0)
         for (entry in entries) {
             if (entry.release()) {
                 recycleBitmap(entry.bitmap)
             }
+        }
+    }
+
+    /**
+     * 共享表硬上限驱逐（cache 线程，buildCache 插入后调用）。
+     *
+     * 为什么不用 removeEldestEntry 回调：真机实测该回调驱动的淘汰未生效
+     * （表一度涨到 1600+ 条、recycled=0、36MB 预算被撑爆 → 建图全部失败 →
+     * 弹幕一批批变稀）。这里在插入后按访问序主动驱逐，把上限变成硬约束；
+     * 被驱逐条目若仍有 item/快照 lease 持有，bitmap 等最后一个引用释放时才回收。
+     */
+    private fun enforceSharedCacheBound() {
+        var evicted = 0
+        while (sharedCacheStore.size > MAX_SHARED_CACHE) {
+            val eldestIt = sharedCacheStore.entries.iterator()
+            if (!eldestIt.hasNext()) break
+            val eldest = eldestIt.next()
+            eldestIt.remove()
+            sharedTableSize.decrementAndGet()
+            evicted++
+            if (eldest.value.release()) {
+                recycleBitmap(eldest.value.bitmap)
+            }
+        }
+        if (evicted > 0 && buildCounter++ % 32 == 0) {
+            AppLog.w(
+                TAG,
+                "shared cache evict batch=$evicted size=${sharedCacheStore.size} limit=$MAX_SHARED_CACHE"
+            )
         }
     }
 
@@ -643,5 +746,6 @@ internal class CacheManager(
         val bitmapBytes: Long = 0L,
         val bitmapMaxBytes: Long = 0L,
         val bitmapCount: Int = 0,
+        val sharedTableSize: Int = 0,
     )
 }

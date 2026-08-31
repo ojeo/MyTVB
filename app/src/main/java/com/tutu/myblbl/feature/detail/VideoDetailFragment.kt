@@ -32,7 +32,7 @@ import com.tutu.myblbl.model.video.detail.UgcSeason
 import com.tutu.myblbl.model.video.detail.VideoDetailModel
 import com.tutu.myblbl.model.video.detail.VideoView
 import com.tutu.myblbl.model.user.CheckRelationModel
-import com.tutu.myblbl.network.session.NetworkSessionGateway
+import com.tutu.myblbl.network.session.SessionStateRepository
 import com.tutu.myblbl.repository.FavoriteRepository
 import com.tutu.myblbl.repository.UserRepository
 import com.tutu.myblbl.repository.VideoRepository
@@ -91,7 +91,7 @@ class VideoDetailFragment : androidx.fragment.app.Fragment() {
     private var launchPlayQueue: List<VideoModel> = emptyList()
 
     private val appEventHub: AppEventHub by inject()
-    private val sessionGateway: NetworkSessionGateway by inject()
+    private val sessionGateway: SessionStateRepository by inject()
     private val videoRepository: VideoRepository by inject()
     private val favoriteRepository: FavoriteRepository by inject()
     private val userRepository: UserRepository by inject()

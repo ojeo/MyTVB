@@ -5,6 +5,7 @@ import android.os.SystemClock
 import com.tutu.myblbl.core.common.cache.FileCacheManager
 import com.tutu.myblbl.core.common.log.AppLog
 import com.tutu.myblbl.core.common.settings.AppSettingsDataStore
+import com.tutu.myblbl.core.common.update.ApkUpdater
 import com.tutu.myblbl.core.lifecycle.AppBackgroundMonitor
 import com.tutu.myblbl.core.ui.image.ImageLoader
 import com.tutu.myblbl.di.appModules
@@ -37,6 +38,7 @@ class MyBLBLApplication : Application() {
     
     companion object {
         private const val TAG = "AppStartup"
+        private const val LEGACY_KEY_DANMAKU_LITE_ENGINE = "danmaku_lite_engine"
 
         lateinit var instance: MyBLBLApplication
             private set
@@ -106,6 +108,9 @@ class MyBLBLApplication : Application() {
             AppLog.i(TAG, "STARTUP sessionRuntimeInit start reason=$reason")
             // 登录态只需要设置缓存、Cookie 和持久化用户资料，不需要先构造 OkHttp/Retrofit。
             trace("initSettingsBlocking", startMs) { initSettingsBlocking(reason) }
+            // 清理已下线的"弹幕引擎"设置（老包可能存"关"=功能优先引擎，该引擎已删除，
+            // 播放器现已固定轻量引擎）。removeAsync 幂等，key 不存在时不会写盘。
+            cleanupLegacyDanmakuEngineSetting()
             // 青少年模式：设置缓存就绪后刷新休息状态，让 restingFlow 反映持久化中的真实值
             com.tutu.myblbl.core.common.content.TeenModeTimer.initOnStartup()
             trace("initNetworkSession", startMs) { initNetworkSession() }
@@ -113,6 +118,9 @@ class MyBLBLApplication : Application() {
             // 既能收敛旧版 totalSize 计数 bug 遗留的超额，也避免后续 Fragment 首次访问时
             // 才支付扫描成本。init() 内部是 Thread.start() fire-and-forget，不阻塞启动。
             trace("initFileCache", startMs) { initFileCache() }
+            // 上一次会话遗留的升级包（update/）已无跨会话用途，启动时后台删掉，
+            // 避免几十 MB 的 APK 一直算在"清除缓存"的数字里。
+            ApkUpdater.cleanupStaleDownload(this)
             trace("initImageSettings", startMs) { ImageLoader.prewarmSettings() }
             sessionRuntimeReady.set(true)
             AppLog.i(TAG, "STARTUP sessionRuntimeInit end reason=$reason elapsed=${SystemClock.elapsedRealtime() - startMs}ms")
@@ -158,6 +166,11 @@ class MyBLBLApplication : Application() {
 
     private fun initSettingsBlocking(reason: String) {
         KoinPlatform.getKoin().get<AppSettingsDataStore>().initCacheBlocking(reason)
+    }
+
+    private fun cleanupLegacyDanmakuEngineSetting() {
+        KoinPlatform.getKoin().get<AppSettingsDataStore>()
+            .removeAsync(LEGACY_KEY_DANMAKU_LITE_ENGINE)
     }
 
     private fun initFileCache() {

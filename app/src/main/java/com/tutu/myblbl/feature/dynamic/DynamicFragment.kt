@@ -17,7 +17,7 @@ import com.tutu.myblbl.databinding.FragmentDynamicBinding
 import com.tutu.myblbl.event.AppEventHub
 import com.tutu.myblbl.model.user.FollowingModel
 import com.tutu.myblbl.model.video.VideoModel
-import com.tutu.myblbl.network.session.NetworkSessionGateway
+import com.tutu.myblbl.network.session.SessionStateRepository
 import com.tutu.myblbl.core.ui.base.BaseFragment
 import com.tutu.myblbl.core.ui.base.OnBackPressedHandler
 import com.tutu.myblbl.core.ui.base.RecyclerViewPoolPrewarmer
@@ -67,7 +67,7 @@ class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarg
     }
 
     private val appEventHub: AppEventHub by inject()
-    private val sessionGateway: NetworkSessionGateway by inject()
+    private val sessionGateway: SessionStateRepository by inject()
     private val viewModel: DynamicViewModel by viewModel()
     private val mainNavigationViewModel: MainNavigationViewModel by activityViewModels()
     private lateinit var upAdapter: DynamicUpAdapter

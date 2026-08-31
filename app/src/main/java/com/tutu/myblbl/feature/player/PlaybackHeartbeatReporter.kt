@@ -1,5 +1,6 @@
 package com.tutu.myblbl.feature.player
 
+import com.tutu.myblbl.core.common.json.GsonHolder
 import com.google.gson.Gson
 import com.tutu.myblbl.core.common.log.AppLog
 import com.tutu.myblbl.network.WbiGenerator
@@ -46,7 +47,7 @@ internal class PlaybackHeartbeatReporter(
         const val PLAY_TYPE_START = 1
     }
 
-    private val gson = Gson()
+    private val gson = GsonHolder.DEFAULT
 
     private var sessionStartTimestampMs: Long = 0L
     private var lastReportedHeartbeatPositionSec: Long = -1L

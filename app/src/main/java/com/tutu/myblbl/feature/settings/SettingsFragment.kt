@@ -1,5 +1,6 @@
 package com.tutu.myblbl.feature.settings
 
+import com.tutu.myblbl.core.common.format.NumberUtils
 import android.app.Activity
 import android.content.Intent
 import android.os.Build
@@ -38,7 +39,6 @@ import com.tutu.myblbl.core.ui.system.ScreenUtils
 import com.tutu.myblbl.feature.player.PlayerInstancePool
 import com.tutu.myblbl.feature.player.VideoPlayerViewModel
 import com.tutu.myblbl.feature.player.cache.PlayerMediaCache
-import com.tutu.myblbl.feature.player.settings.PlayerSettingsStore
 import com.tutu.myblbl.feature.player.sponsor.SponsorBlockRepository
 import com.tutu.myblbl.core.common.ext.normalizeDanmakuSmartFilterValue
 import com.tutu.myblbl.network.cookie.CookieManager
@@ -120,7 +120,6 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
         private const val KEY_RESUME_PLAYBACK = "resume_playback"
         private const val KEY_SPONSOR_BLOCK_ENABLED = "sponsor_block_enabled"
         private const val KEY_AUDIO_NORMALIZE = "audio_normalize"
-        private const val KEY_DANMAKU_LITE_ENGINE = "danmaku_lite_engine"
         private const val COMMON_POSITION_RISK_CONTROL = 6
         private val DM_SMART_FILTER_OPTIONS = arrayOf("关", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10")
 
@@ -258,8 +257,7 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
             SettingModel(getString(R.string.allow_vip_colorful_dm), "开"),
             SettingModel(getString(R.string.dm_merge_duplicate), "开"),
             SettingModel(getString(R.string.dm_smart_shield), "关"),
-            SettingModel(getString(R.string.show_dm_switch), "关"),
-            SettingModel("弹幕引擎", "性能优先")
+            SettingModel(getString(R.string.show_dm_switch), "关")
         )
 
         deviceSettings.add(DEVICE_POSITION_VERSION, SettingModel("应用版本", BuildConfig.VERSION_NAME))
@@ -599,7 +597,6 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
                 appSettings.putStringAsync(KEY_DM_SMART_SHIELD, value)
             }
             12 -> toggleSetting(dmSettings, 12, KEY_SHOW_DM_SWITCH)
-            13 -> toggleDanmakuEngine()
         }
     }
 
@@ -983,7 +980,7 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
             ImageLoader.clearDiskCache(context)
             deleteDir(context.cacheDir)
             context.externalCacheDir?.let { deleteDir(it) }
-            commonSettings[0].info = formatFileSize(getCurrentCacheSize())
+            commonSettings[0].info = NumberUtils.formatBytes(getCurrentCacheSize())
             adapter.notifyItemChanged(0)
             Toast.makeText(requireContext(), "缓存已清除", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
@@ -1005,7 +1002,7 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
             PlayerMediaCache.reset(requireContext())
             VideoPlayerViewModel.clearCachedPlayback()
             PlayerInstancePool.clearAttachedSource()
-            commonSettings[0].info = formatFileSize(getCurrentCacheSize())
+            commonSettings[0].info = NumberUtils.formatBytes(getCurrentCacheSize())
             adapter.notifyItemChanged(0)
         }
     }
@@ -1014,7 +1011,7 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
         updateScope.launch {
             val size = withContext(Dispatchers.IO) { getCurrentCacheSize() }
             if (!isAdded) return@launch
-            commonSettings[0].info = formatFileSize(size)
+            commonSettings[0].info = NumberUtils.formatBytes(size)
             if (currentCategory == CATEGORY_COMMON) {
                 adapter.notifyItemChanged(0)
             }
@@ -1057,15 +1054,6 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
                     file.delete()
                 }
             }
-        }
-    }
-
-    private fun formatFileSize(size: Long): String {
-        return when {
-            size < 1024 -> "$size B"
-            size < 1024 * 1024 -> String.format(Locale.getDefault(), "%.1f KB", size / 1024.0)
-            size < 1024 * 1024 * 1024 -> String.format(Locale.getDefault(), "%.1f MB", size / (1024.0 * 1024))
-            else -> String.format(Locale.getDefault(), "%.1f GB", size / (1024.0 * 1024 * 1024))
         }
     }
 
@@ -1130,10 +1118,6 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
         applySavedValue(dmSettings, 10, KEY_DM_MERGE_DUPLICATE)
         applySavedValue(dmSettings, 11, KEY_DM_SMART_SHIELD)
         applySavedValue(dmSettings, 12, KEY_SHOW_DM_SWITCH)
-        // 弹幕引擎（index 13）：存"开/关"，显示"性能优先/功能优先"
-        appSettings.getCachedString(KEY_DANMAKU_LITE_ENGINE)?.let { saved ->
-            dmSettings.getOrNull(13)?.info = if (saved == "开") "性能优先" else "功能优先"
-        }
     }
 
     private fun applySavedValue(target: MutableList<SettingModel>, index: Int, key: String) {
@@ -1206,9 +1190,11 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
     }
 
     private fun getCurrentCacheSize(): Long {
-        val internal = getFolderSize(requireContext().cacheDir)
-        val external = requireContext().externalCacheDir?.let { getFolderSize(it) } ?: 0L
-        return internal + external
+        // 统计口径与"缓存限制"一致：只算受该设置管辖的两个目录
+        // （JSON 数据缓存 + 播放器媒体缓存）。图片/HTTP 缓存与升级包
+        // 不归这个设置管，不计入，避免显示值永远超限。
+        val mediaCacheDir = PlayerMediaCache.getCacheDir(requireContext())
+        return getFolderSize(FileCacheManager.cacheDir) + getFolderSize(mediaCacheDir)
     }
 
     private fun showDmChoiceDialog(position: Int, key: String, options: Array<String>) {
@@ -1402,26 +1388,6 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
                 if (!isAdded) return@withContext
                 Toast.makeText(requireContext(), fetchResult, Toast.LENGTH_LONG).show()
             }
-        }
-    }
-
-    private fun toggleDanmakuEngine() {
-        val setting = dmSettings.getOrNull(13) ?: return
-        showChoiceDialog(
-            title = setting.title,
-            currentValue = setting.info,
-            options = arrayOf("功能优先", "性能优先")
-        ) { value ->
-            updateSetting(dmSettings, 13, value)
-            // 存"开/关"格式与其它 toggle 一致；性能优先=开，功能优先=关
-            val lite = value == "性能优先"
-            appSettings.putStringAsync(KEY_DANMAKU_LITE_ENGINE, if (lite) "开" else "关")
-            PlayerSettingsStore.saveDanmakuLiteEngine(lite)
-            Toast.makeText(
-                requireContext(),
-                "弹幕引擎：$value，重新进入播放后生效",
-                Toast.LENGTH_LONG
-            ).show()
         }
     }
 

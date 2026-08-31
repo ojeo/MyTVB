@@ -17,7 +17,7 @@ import com.tutu.myblbl.model.user.CheckRelationModel
 import com.tutu.myblbl.model.video.Owner
 import com.tutu.myblbl.model.video.UserDynamicResponse
 import com.tutu.myblbl.model.video.VideoModel
-import com.tutu.myblbl.network.session.NetworkSessionGateway
+import com.tutu.myblbl.network.session.SessionStateRepository
 import com.tutu.myblbl.repository.UserRepository
 import com.tutu.myblbl.ui.activity.PlayerActivity
 import com.tutu.myblbl.ui.adapter.VideoAdapter
@@ -50,7 +50,7 @@ class OwnerDetailDialog(
 
     private val binding = DialogOwnerDetailBinding.inflate(LayoutInflater.from(context))
     private val userRepository: UserRepository by inject()
-    private val sessionGateway: NetworkSessionGateway by inject()
+    private val sessionGateway: SessionStateRepository by inject()
     private val appEventHub: AppEventHub by inject()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val videoAdapter = VideoAdapter(

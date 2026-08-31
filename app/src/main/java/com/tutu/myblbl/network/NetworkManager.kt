@@ -2,6 +2,7 @@
 
 package com.tutu.myblbl.network
 
+import com.tutu.myblbl.core.common.json.GsonHolder
 import android.content.Context
 import com.tutu.myblbl.model.BaseResponse
 import com.tutu.myblbl.model.user.UserDetailInfoModel
@@ -13,11 +14,13 @@ import com.tutu.myblbl.network.security.AppSignUtils
 import com.tutu.myblbl.network.security.BiliSecurityCoordinator
 import com.tutu.myblbl.network.session.AuthContext
 import com.tutu.myblbl.network.session.NetworkSessionStore
+import com.tutu.myblbl.network.session.SessionState
 import com.tutu.myblbl.network.ua.DesktopUserAgentStore
 import com.tutu.myblbl.core.common.log.AppLog
 import com.tutu.myblbl.core.common.settings.AppSettingsDataStore
 import com.tutu.myblbl.network.cookie.CookieManager
 import okhttp3.OkHttpClient
+import kotlinx.coroutines.flow.StateFlow
 import org.json.JSONObject
 import org.koin.mp.KoinPlatform
 import retrofit2.Retrofit
@@ -51,7 +54,10 @@ object NetworkManager {
         preferenceName = PREF_NAME,
         preferenceKey = KEY_CURRENT_UA
     )
-    private val sessionStore = NetworkSessionStore(authInvalidCode = AUTH_INVALID_CODE)
+    private val sessionStore = NetworkSessionStore(
+        authInvalidCode = AUTH_INVALID_CODE,
+        hasSessionCookie = { internalCookieManager.hasSessionCookie() }
+    )
 
     private val currentUserAgentValue: String
         get() = userAgentStore.getCurrentUserAgent()
@@ -86,7 +92,7 @@ object NetworkManager {
     }
 
     private val gson by lazy {
-        NetworkClientFactory.createGson()
+        GsonHolder.CONFIGURED
     }
 
     private val retrofit: Retrofit by lazy {
@@ -141,6 +147,8 @@ object NetworkManager {
             sessionStore.initPersistence(
                 applicationContext.getSharedPreferences("network_session_store", Context.MODE_PRIVATE)
             )
+            // cookie 在上一步已从磁盘恢复，这里统一对齐一次会话状态
+            sessionStore.refreshSessionState()
             sessionInitialized = true
             AppLog.i(TAG, "initSession elapsed=${android.os.SystemClock.elapsedRealtime() - startMs}ms")
         }
@@ -226,15 +234,35 @@ object NetworkManager {
         return internalCookieManager.hasSessionCookie()
     }
 
+    /** 会话单一状态源（cookie + userInfo 组合），UI 订阅用 */
+    val sessionState: StateFlow<SessionState>
+        get() = sessionStore.sessionState
+
+    fun currentSessionState(): SessionState {
+        return sessionStore.sessionState.value
+    }
+
     fun clearUserSession(clearCookies: Boolean = true, reason: String = "unknown") {
+        val hadSession = sessionStore.getUserInfo() != null || internalCookieManager.hasSessionCookie()
         sessionStore.clearUserSession()
         resetSessionLifecycleState(clearCookies = clearCookies, reason = reason)
+        // cookie 可能刚被清掉，重新对齐 CookieOnly/LoggedOut 区分
+        sessionStore.refreshSessionState()
+        if (hadSession) {
+            // 会话从有到无，统一在此广播；调用方不再各自手动 dispatch
+            notifySessionChanged()
+        }
     }
 
     private fun softClearUserSession(reason: String) {
+        val hadUserInfo = sessionStore.getUserInfo() != null
         sessionStore.softClearUserSession()
         securityCoordinator.resetRuntimeState()
         AppLog.w(TAG, "softClearUserSession: reason=$reason")
+        if (hadUserInfo) {
+            // 服务端 -101 失效也会走这里；只有状态真正发生跳变才广播，防并行请求事件风暴
+            notifySessionChanged()
+        }
     }
 
     suspend fun tryRecoverExpiredSession(): Boolean {
@@ -273,8 +301,8 @@ object NetworkManager {
     }
 
     private fun hardClearAndNotify(reason: String) {
+        // 广播已收敛到 clearUserSession 内部（跳变守卫），此处不再重复 notify
         clearUserSession(clearCookies = true, reason = reason)
-        notifySessionChanged()
     }
 
     private fun notifySessionChanged() {
@@ -318,6 +346,9 @@ object NetworkManager {
 
     suspend fun activateAfterLogin() {
         securityCoordinator.activateAfterLogin()
+        // 登录 cookie 已写入（扫码流程），立即从 LoggedOut 对齐到 CookieOnly，
+        // 不必等首次 nav 请求返回
+        sessionStore.refreshSessionState()
     }
 
     suspend fun ensureWebFingerprintCookies() {
@@ -366,7 +397,12 @@ object NetworkManager {
     }
 
     fun updateUserSession(info: UserDetailInfoModel?) {
+        val wasActive = sessionStore.isSessionActive()
         sessionStore.updateUserSession(info)
+        if (!wasActive && sessionStore.isSessionActive()) {
+            // 登录成功（扫码后首次拉到用户信息）也会经此通知，登录页不再手动 dispatch
+            notifySessionChanged()
+        }
     }
 
     fun syncUserSession(
@@ -374,13 +410,14 @@ object NetworkManager {
         source: String,
         context: AuthContext = AuthContext.FOREGROUND
     ): UserDetailInfoModel? {
+        val wasActive = sessionStore.isSessionActive()
         val info = sessionStore.syncUserSession(response, context) {
             softClearUserSession(reason = "$source code=${response.code}")
         }
-        if (info != null) {
-            return info
+        if (info != null && !wasActive) {
+            notifySessionChanged()
         }
-        return null
+        return info
     }
 
     fun handleAuthFailureCode(code: Int, source: String) {

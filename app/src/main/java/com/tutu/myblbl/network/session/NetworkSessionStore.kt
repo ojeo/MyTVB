@@ -1,5 +1,6 @@
 package com.tutu.myblbl.network.session
 
+import com.tutu.myblbl.core.common.json.GsonHolder
 import android.content.SharedPreferences
 import com.google.gson.Gson
 import com.tutu.myblbl.model.BaseResponse
@@ -8,9 +9,15 @@ import com.tutu.myblbl.network.WbiGenerator
 import com.tutu.myblbl.network.response.Base2Response
 import com.tutu.myblbl.network.response.BaseBaseResponse
 import com.tutu.myblbl.core.common.log.AppLog
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 class NetworkSessionStore(
-    private val authInvalidCode: Int
+    private val authInvalidCode: Int,
+    // Cookie 真值在 CookieManager 里；store 只拿探针判断"是否有 SESSDATA"，
+    // 用于在 CookieOnly / LoggedOut 之间区分
+    private val hasSessionCookie: () -> Boolean = { false }
 ) {
 
     companion object {
@@ -21,12 +28,17 @@ class NetworkSessionStore(
         private const val TAG = "NetworkSessionStore"
     }
 
-    private val gson = Gson()
+    private val gson = GsonHolder.DEFAULT
     private var wbiImageKey: String = ""
     private var wbiSubKey: String = ""
     private var wbiKeysUpdatedAt: Long = 0L
     private var userInfo: UserDetailInfoModel? = null
     private var sharedPrefs: SharedPreferences? = null
+
+    private val _sessionState = MutableStateFlow<SessionState>(SessionState.LoggedOut)
+
+    /** 会话单一状态源：userInfo/cookie 变更点内部维护，UI 只订阅 */
+    val sessionState: StateFlow<SessionState> = _sessionState.asStateFlow()
 
     fun initPersistence(prefs: SharedPreferences) {
         sharedPrefs = prefs
@@ -43,6 +55,7 @@ class NetworkSessionStore(
         }.onSuccess { restored ->
             userInfo = restored?.let { it.copy(face = normalizeAvatarUrl(it.face)) }
             AppLog.i(TAG, "restorePersistedUserInfo hit mid=${userInfo?.mid ?: 0} hasFace=${!userInfo?.face.isNullOrBlank()}")
+            refreshSessionState()
         }.onFailure {
             AppLog.w(TAG, "restorePersistedUserInfo failed; clearing", it)
             sharedPrefs?.edit()?.remove(PREFS_KEY_USER_INFO)?.apply()
@@ -90,11 +103,13 @@ class NetworkSessionStore(
         wbiKeysUpdatedAt = 0L
         sharedPrefs?.edit()?.remove(PREFS_KEY_USER_INFO)?.apply()
         setWbiInfo("", "")
+        refreshSessionState()
     }
 
     fun softClearUserSession() {
         userInfo = null
         sharedPrefs?.edit()?.remove(PREFS_KEY_USER_INFO)?.apply()
+        refreshSessionState()
     }
 
     fun isSessionActive(): Boolean {
@@ -108,6 +123,7 @@ class NetworkSessionStore(
         if (userInfo == null) {
             sharedPrefs?.edit()?.remove(PREFS_KEY_USER_INFO)?.apply()
             setWbiInfo("", "")
+            refreshSessionState()
             return
         }
         val normalizedUser = requireNotNull(userInfo)
@@ -117,6 +133,22 @@ class NetworkSessionStore(
         val imgKey = normalizedUser.wbiImg?.imgUrl?.let(WbiGenerator::extractKeyFromUrl).orEmpty()
         val subKey = normalizedUser.wbiImg?.subUrl?.let(WbiGenerator::extractKeyFromUrl).orEmpty()
         setWbiInfo(imgKey, subKey)
+        refreshSessionState()
+    }
+
+    /**
+     * cookie 变更的收口点（登录写入 / 清除 / 冷启动恢复后）由 NetworkManager 调用，
+     * 让 CookieOnly 与 LoggedOut 的区分跟上 cookie 真值。
+     */
+    fun refreshSessionState() {
+        val newState = when {
+            userInfo != null -> SessionState.LoggedIn(userInfo!!)
+            hasSessionCookie() -> SessionState.CookieOnly
+            else -> SessionState.LoggedOut
+        }
+        if (_sessionState.value != newState) {
+            _sessionState.value = newState
+        }
     }
 
     fun syncUserSession(
