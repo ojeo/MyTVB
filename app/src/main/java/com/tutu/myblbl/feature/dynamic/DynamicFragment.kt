@@ -113,11 +113,43 @@ class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarg
                 preferredContentFocusTarget = ContentFocusTarget.FILTER_BAR
             }
         }
+        // 面板开启时系统寻焦会优先命中右栏视频卡（其左缘比键盘按键更靠左 4dp，
+        // FocusFinder 加权距离更小），这里显式把右键桥接到悬浮键盘。
+        binding.viewFilterBar.setOnKeyListener { _, keyCode, event ->
+            event.action == KeyEvent.ACTION_DOWN &&
+                keyCode == KeyEvent.KEYCODE_DPAD_RIGHT &&
+                focusIntoFilterKeyboard(View.FOCUS_RIGHT)
+        }
     }
 
     private fun setupFilterInput() {
         binding.keyboardFilter.setKeySelectListener(this)
         binding.keyboardFilter.setDispatchKeyDel(true)
+    }
+
+    /**
+     * 面板开启时把焦点移入悬浮键盘：在面板内按空间距离挑最近的按键。
+     *
+     * 左栏 UP 项 / 右栏视频卡都装了 `OnKeyListener`，其返回值会抢在系统方向键寻焦
+     * 之前消费事件（`View.dispatchKeyEvent` 先回调 `OnKeyListener`，
+     * `ViewPostImeInputStage` 只有事件未被消费才做 `focusSearch`），
+     * 因此必须在这些入口显式桥接，否则焦点一旦离开键盘就再也回不去。
+     *
+     * 键盘按键是运行时构建的，收集可聚焦子 View 之前必须先 `ensureKeyboardBuilt()`。
+     */
+    private fun focusIntoFilterKeyboard(direction: Int): Boolean {
+        if (!filterInputOpen) return false
+        binding.keyboardFilter.ensureKeyboardBuilt()
+        val moved = SpatialFocusNavigator.requestBestDescendant(
+            anchorView = activity?.currentFocus,
+            root = binding.panelFilterInput,
+            direction = direction,
+            fallback = null
+        )
+        if (moved) {
+            preferredContentFocusTarget = ContentFocusTarget.FILTER_INPUT
+        }
+        return moved
     }
 
     private fun openFilterInput() {
@@ -128,6 +160,9 @@ class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarg
         viewModel.ensureAllFollowingLoaded()
         syncFilterQueryText()
         binding.panelFilterInput.visibility = View.VISIBLE
+        // 键盘卡片覆盖 x∈[18%,53%]，右栏第 0 列完全被遮住。面板开启期间让右栏整体
+        // 退出焦点图，避免焦点落到看不见的卡片上（也让"键盘按右键"变为无候选、焦点不动）。
+        binding.recyclerViewRight.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         // 等待布局完成后再请求键盘焦点（KeyboardView 需构建 header/键盘/页脚）
         binding.keyboardFilter.post { binding.keyboardFilter.requestPrimaryFocus() }
     }
@@ -136,6 +171,7 @@ class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarg
         if (!filterInputOpen) return
         filterInputOpen = false
         binding.panelFilterInput.visibility = View.GONE
+        binding.recyclerViewRight.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
         preferredContentFocusTarget = ContentFocusTarget.FILTER_BAR
         if (restoreFilterBarFocus) {
             binding.viewFilterBar.post {
@@ -221,7 +257,8 @@ class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarg
                 }
             },
             onLeftEdge = { (activity as? MainActivity)?.focusLeftFunctionArea() == true },
-            onRightEdge = { focusNearestVideoCard() },
+            // 面板开启时优先进入悬浮键盘，否则按原逻辑跳右栏
+            onRightEdge = { focusIntoFilterKeyboard(View.FOCUS_RIGHT) || focusNearestVideoCard() },
             debugTag = null
         )
         binding.recyclerViewLeft.layoutManager = LinearLayoutManager(requireContext())
@@ -744,6 +781,8 @@ class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarg
     }
 
     private fun focusRightContent(): Boolean {
+        // 面板开启期间右栏被键盘卡片遮挡且已退出焦点图，不接受焦点
+        if (filterInputOpen) return false
         if (TabContentFocusHelper.requestVisibleFocus(buttonRetry)) {
             return true
         }
@@ -754,6 +793,7 @@ class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarg
     }
 
     private fun focusNearestVideoCard(): Boolean {
+        if (filterInputOpen) return false
         val anchor = activity?.currentFocus
         if (anchor != null && anchor.isDescendantOf(binding.recyclerViewLeft)) {
             if (videoAdapter.itemCount == 0) {
