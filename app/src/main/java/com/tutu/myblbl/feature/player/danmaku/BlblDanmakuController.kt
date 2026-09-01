@@ -260,7 +260,7 @@ class BlblDanmakuController(
         dataStopped = false
         resumeDataRequested = false
         viewProvider()?.setDanmakus(emptyList())
-        viewProvider()?.invalidate()
+        viewProvider()?.requestMainFrame()
     }
 
     override fun addLiveDanmaku(dm: DmModel) {
@@ -340,7 +340,7 @@ class BlblDanmakuController(
         // 播放意图恢复（后台返回/buffering 想播）时主动 invalidate，让渲染循环重启
         // （循环启停看 isPlaying || playWhenReady，时钟推进只看 isPlaying）。
         if (!wasPlaying && playWhenReady) {
-            viewProvider()?.invalidate()
+            viewProvider()?.requestMainFrame()
         }
         if (playWhenReady) startDriftSync()
     }
@@ -350,7 +350,7 @@ class BlblDanmakuController(
         val wasPlaying = isPlaying
         isPlaying = playing
         if (!wasPlaying && playing) {
-            viewProvider()?.invalidate()
+            viewProvider()?.requestMainFrame()
         }
     }
 
@@ -369,7 +369,7 @@ class BlblDanmakuController(
         if (dataStopped && rawItems.isNotEmpty()) {
             requestDataResume()
         }
-        viewProvider()?.invalidate()
+        viewProvider()?.requestMainFrame()
     }
 
     override fun setEnabled(enabled: Boolean) {
@@ -398,7 +398,7 @@ class BlblDanmakuController(
             renderingStopped = true
             requestDataResume()
         }
-        if (!wasPlaying) viewProvider()?.invalidate()
+        if (!wasPlaying) viewProvider()?.requestMainFrame()
         startDriftSync()
     }
 

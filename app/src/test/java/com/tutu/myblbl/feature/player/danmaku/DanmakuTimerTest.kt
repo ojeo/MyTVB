@@ -6,9 +6,9 @@ import org.junit.Test
 import kotlin.math.abs
 
 /**
- * 混合时钟策略的行为回归（硬锚仅限 seek，其余偏差渐进收敛）：
- * - resume/未报告漂移不得出现"同帧整体跳变"（PR #53 的动机）
- * - 偏差须在有限时间内收敛到 raw 附近（不能永久滞后）
+ * 混合时钟策略的行为回归：
+ * - raw 短暂落后时不得反向追赶，避免周期性冻结/跳变
+ * - resume 后仅以前向有界速率收敛，不得出现同帧整体跳变
  * - seek 仍瞬时硬锚、暂停边界仍不回退、softSyncFactor 仍然生效、极端漂移硬锚兜底
  */
 class DanmakuTimerTest {
@@ -45,11 +45,11 @@ class DanmakuTimerTest {
         val resumePos = timer.step(now, rawMs, isPlaying = true, playbackSpeed = 1f, seekSerial = 0)
         assertTrue("resume 帧发生硬跳 resume=$resumePos raw=$rawMs", resumePos <= rawMs - gapAtResume + frameMs)
 
-        // 之后渐进收敛：单帧前进量有界，且 1.5s 内贴近 raw
+        // 之后以前向 +10% 上限渐进收敛：单帧前进量有界，约 10s 内贴近 raw。
         var maxStep = 0L
         var prev = resumePos
         var converged = false
-        repeat(90) {
+        repeat(900) {
             now += frameNs
             rawMs += frameMs
             val pos = timer.step(now, rawMs, isPlaying = true, playbackSpeed = 1f, seekSerial = 0)
@@ -57,8 +57,8 @@ class DanmakuTimerTest {
             prev = pos
             if (rawMs - pos in 0L..30L) converged = true
         }
-        assertTrue("1.5s 内未收敛到 30ms 内，最终 gap=${rawMs - prev}", converged)
-        assertTrue("收敛期间出现单帧大跳 $maxStep ms", maxStep in 0L..60L)
+        assertTrue("有界前向追赶未收敛到 30ms 内，最终 gap=${rawMs - prev}", converged)
+        assertTrue("收敛期间出现单帧大跳 $maxStep ms", maxStep in 0L..20L)
     }
 
     @Test
@@ -101,7 +101,7 @@ class DanmakuTimerTest {
     }
 
     @Test
-    fun pausedForwardGapConvergesGradually() {
+    fun pausedForwardGapKeepsDanmakuFrozen() {
         val timer = DanmakuTimer()
         var now = 0L
         var rawMs = 60_000L
@@ -112,19 +112,38 @@ class DanmakuTimerTest {
             timer.step(now, rawMs, isPlaying = true, playbackSpeed = 1f, seekSerial = 0)
         }
 
-        // 暂停中 raw 明显前跳（≥120ms 触发向前纠偏）：应渐进收敛而非一次性硬锚
+        // 暂停/缓冲时 raw 可能是解码器推测位置；弹幕必须保持冻结。
         now += frameNs
         rawMs += 500
-        val first = timer.step(now, rawMs, isPlaying = false, playbackSpeed = 1f, seekSerial = 0)
-        assertTrue("暂停纠偏首帧移动过大 ${(first - 60_000L) - 30 * frameMs}", first - 60_510L < 100)
+        val frozenAt = timer.step(now, rawMs, isPlaying = false, playbackSpeed = 1f, seekSerial = 0)
 
-        var converged = false
         repeat(120) {
             now += frameNs
             timer.step(now, rawMs, isPlaying = false, playbackSpeed = 1f, seekSerial = 0)
-            if (rawMs - timer.currentPositionMs() in 0L..30L) converged = true
         }
-        assertTrue("暂停纠偏未收敛", converged)
+        assertEquals(frozenAt, timer.currentPositionMs())
+    }
+
+    @Test
+    fun transientRawLagNeverSlowsOrRewindsSmoothClock() {
+        val timer = DanmakuTimer()
+        var now = 0L
+        var rawMs = 60_000L
+        timer.step(now, rawMs, isPlaying = true, playbackSpeed = 1f, seekSerial = 0)
+        repeat(30) {
+            now += frameNs
+            rawMs += frameMs
+            timer.step(now, rawMs, isPlaying = true, playbackSpeed = 1f, seekSerial = 0)
+        }
+
+        var previous = timer.currentPositionMs()
+        // Reproduce Player.currentPosition temporarily stalling while Choreographer keeps ticking.
+        repeat(24) {
+            now += frameNs
+            val current = timer.step(now, rawMs, isPlaying = true, playbackSpeed = 1f, seekSerial = 0)
+            assertTrue("raw 落后时平滑时钟停顿/回退：${current - previous}ms", current - previous in 16L..17L)
+            previous = current
+        }
     }
 
     @Test

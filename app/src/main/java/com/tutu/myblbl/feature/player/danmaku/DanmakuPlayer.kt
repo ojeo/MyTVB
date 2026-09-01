@@ -140,13 +140,22 @@ internal class DanmakuPlayer(
         if (released) return
         if (started) return
         started = true
+        view.startMainFrameLoop()
         actionHandler.post {
             frameLoopIdle = false
             idleWakeDrawRequested.set(false)
             actionHandler.removeMessages(MSG_IDLE_WAKE)
             postFrameCallback()
         }
-        view.postInvalidateOnAnimation()
+    }
+
+    fun isStarted(): Boolean = started
+
+    /** Completes the sparse-timeline wake handshake after Media3 state was sampled on main. */
+    fun onMainFrameSampled() {
+        if (idleWakeDrawRequested.compareAndSet(true, false)) {
+            actionHandler.sendEmptyMessage(MSG_RESUME_FROM_IDLE)
+        }
     }
 
     fun setDebugEnabled(enabled: Boolean) {
@@ -230,6 +239,7 @@ internal class DanmakuPlayer(
     fun stop() {
         if (!started) return
         started = false
+        view.stopMainFrameLoop()
         actionHandler.post {
             frameLoopIdle = false
             idleWakeDrawRequested.set(false)
@@ -242,6 +252,7 @@ internal class DanmakuPlayer(
         if (released) return
         released = true
         started = false
+        view.stopMainFrameLoop()
         if (AppLog.isEnabled) {
             AppLog.w(DIAG_TAG, "player RELEASE (engine permanently stopped; view detach/replay requires new instance)")
         }
@@ -306,65 +317,39 @@ internal class DanmakuPlayer(
         timer.syncTo(positionMs)
     }
 
-    fun draw(
-        canvas: Canvas,
-        rawPositionMs: Long,
-        isPlaying: Boolean,
-        playWhenReady: Boolean,
-        playbackSpeed: Float,
-        config: DanmakuConfig,
-    ) {
-        if (released) return
-        latestPlaybackSpeed = playbackSpeed
-        if (!config.enabled) {
-            if (lastEnabled || started) {
-                stop()
-            }
-            if (lastEnabled) {
-                requestClear()
-            }
-            lastEnabled = false
-            return
-        }
-        lastEnabled = true
-        // 渲染循环启停只看"是否想播放"：isPlaying（真在解码）或 playWhenReady（想播但可能在 buffering）。
-        // 修复 bug2：后台返回时 ExoPlayer 还在 buffering，isPlaying 尚未变 true，
-        // 但 playWhenReady 已为 true，此时必须保持渲染循环，否则弹幕卡死直到首帧。
-        if (isPlaying || playWhenReady) {
-            if (!started) {
-                if (AppLog.isEnabled) {
-                    AppLog.i(DIAG_TAG, "loop START play=$isPlaying pwr=$playWhenReady pos=${rawPositionMs}ms")
-                }
-            }
-            startIfNeeded()
-        } else if (started) {
-            // Freeze danmaku on pause: no need to keep 60fps update loop running.
-            if (AppLog.isEnabled) {
-                AppLog.i(DIAG_TAG, "loop STOP play=$isPlaying pwr=$playWhenReady pos=${rawPositionMs}ms")
-            }
-            stop()
-        }
-
+    private fun prepareFrame(state: DanmakuView.RenderState) {
+        latestPlaybackSpeed = state.playbackSpeed
         val frameId = uiFrameId.incrementAndGet()
         engineMain.drainReleasedBitmaps(frameId)
         val nowNanos = System.nanoTime()
         val smoothPos =
             timer.step(
                 nowNanos = nowNanos,
-                rawPositionMs = rawPositionMs,
-                isPlaying = isPlaying,
-                playbackSpeed = playbackSpeed,
+                rawPositionMs = state.rawPositionMs,
+                isPlaying = state.isPlaying,
+                playbackSpeed = state.playbackSpeed,
                 seekSerial = seekSerial.get(),
             )
 
         engineMain.stepTime(positionMs = smoothPos, uiFrameId = frameId)
-        if (idleWakeDrawRequested.compareAndSet(true, false)) {
-            actionHandler.sendEmptyMessage(MSG_RESUME_FROM_IDLE)
-        }
+    }
 
+    private fun requestViewFrame() {
+        if (released) return
+        view.requestRenderFrame()
+    }
+
+    fun drawViewFrame(canvas: Canvas, state: DanmakuView.RenderState) {
+        if (released) return
+        if (!state.config.enabled) {
+            if (lastEnabled) requestClear()
+            lastEnabled = false
+            return
+        }
+        lastEnabled = true
         val snapshot = engineMain.acquireRenderSnapshot()
         try {
-            engineMain.draw(canvas, snapshot, config)
+            engineMain.draw(canvas, snapshot, state.config)
         } finally {
             engineMain.releaseRenderSnapshot(snapshot)
         }
@@ -409,7 +394,7 @@ internal class DanmakuPlayer(
                         )
                     }
                     idleWakeDrawRequested.set(true)
-                    view.postInvalidateOnAnimation()
+                    view.requestMainFrame()
                 }
 
                 MSG_RESUME_FROM_IDLE -> {
@@ -422,6 +407,7 @@ internal class DanmakuPlayer(
                         )
                     }
                     frameLoopIdle = false
+                    view.startMainFrameLoop()
                     runFrameUpdate()
                 }
 
@@ -496,6 +482,7 @@ internal class DanmakuPlayer(
                 MSG_OP_RELEASE -> {
                     removeCallbacksAndMessages(null)
                     Choreographer.getInstance().removeFrameCallback(frameCallback)
+                    view.stopMainFrameLoop()
                     started = false
                     frameLoopIdle = false
                     idleWakeDrawRequested.set(false)
@@ -512,6 +499,7 @@ internal class DanmakuPlayer(
                 frameLoopIdle = false
                 idleWakeDrawRequested.set(false)
                 removeMessages(MSG_IDLE_WAKE)
+                view.startMainFrameLoop()
                 sendEmptyMessage(MSG_FRAME_UPDATE)
                 return
             }
@@ -520,8 +508,14 @@ internal class DanmakuPlayer(
 
         private fun renderOnceIfPaused(positionMs: Long? = null) {
             if (released || started) return
-            val pos = positionMs ?: engineAction.currentPositionMs()
-            engineAction.stepTime(positionMs = pos, uiFrameId = uiFrameId.get())
+            val sampled = view.renderStateSnapshot()
+            val state =
+                if (positionMs == null) {
+                    sampled
+                } else {
+                    sampled.copy(rawPositionMs = positionMs)
+                }
+            prepareFrame(state)
             val sampleAct = perfSampleRequested.getAndSet(false)
             val shouldMeasure = debugEnabled || sampleAct
             val t0 = if (shouldMeasure) System.nanoTime() else 0L
@@ -539,14 +533,19 @@ internal class DanmakuPlayer(
                     perfLastActAtUptimeMs = SystemClock.uptimeMillis()
                 }
             }
-            view.invalidateDanmakuAreaOnAnimation()
+            requestViewFrame()
         }
 
         private fun runFrameUpdate() {
             try {
                 engineAction.preAct()
                 if (released || !started) return
+                // Pre-arm the next action tick before doing any work. Registering after act() can
+                // miss the next vsync when this message is handled near the frame boundary.
+                postFrameCallback()
                 frameUpdateCount.incrementAndGet()
+                val state = view.renderStateSnapshot()
+                prepareFrame(state)
                 val sampleAct = perfSampleRequested.getAndSet(false)
                 val shouldMeasure = debugEnabled || sampleAct
                 val t0 = if (shouldMeasure) System.nanoTime() else 0L
@@ -564,13 +563,15 @@ internal class DanmakuPlayer(
                         perfLastActAtUptimeMs = SystemClock.uptimeMillis()
                     }
                 }
-                view.invalidateDanmakuAreaOnAnimation()
+                requestViewFrame()
                 val schedule = engineAction.frameSchedule()
                 if (schedule.animate) {
                     frameLoopIdle = false
-                    postFrameCallback()
                 } else {
+                    // The callback was pre-armed above; cancel it while the sparse timeline sleeps.
+                    Choreographer.getInstance().removeFrameCallback(frameCallback)
                     frameLoopIdle = true
+                    view.stopMainFrameLoop()
                     idleCycleCount.incrementAndGet()
                     schedule.nextWakeAtMs?.let { nextWakeAtMs ->
                         val delayMs = resolveDanmakuIdleWakeDelayMs(

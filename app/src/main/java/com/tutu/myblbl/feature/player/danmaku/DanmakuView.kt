@@ -2,9 +2,14 @@ package com.tutu.myblbl.feature.player.danmaku
 
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Typeface
+import android.os.Looper
 import android.os.SystemClock
 import android.util.AttributeSet
 import android.util.TypedValue
+import android.view.Choreographer
 import android.view.View
 import com.tutu.myblbl.core.common.log.AppLog
 import com.tutu.myblbl.feature.player.danmaku.common.BiliDanmakuStyle
@@ -30,6 +35,9 @@ class DanmakuView @JvmOverloads constructor(
 
     @Volatile private var perfLastDrawMs: Float = 0f
     @Volatile private var perfLastDrawAtUptimeMs: Long = 0L
+    @Volatile private var perfLastLockMs: Float = 0f
+    @Volatile private var perfLastContentMs: Float = 0f
+    @Volatile private var perfLastPostMs: Float = 0f
 
     private var lastConfig: DanmakuConfig? = null
     private var lastRawPositionMs: Long = 0L
@@ -38,6 +46,68 @@ class DanmakuView @JvmOverloads constructor(
     @Volatile private var invalidateFull: Boolean = true
     @Volatile private var invalidateTopPx: Int = 0
     @Volatile private var invalidateBottomPx: Int = 0
+
+    /**
+     * Playback state is sampled on the application looper because Media3 Player access is
+     * main-thread confined. The action thread consumes this immutable snapshot, advances the
+     * smooth clock while the main Choreographer draws the latest immutable snapshot.
+     */
+    internal data class RenderState(
+        val rawPositionMs: Long,
+        val isPlaying: Boolean,
+        val playWhenReady: Boolean,
+        val playbackSpeed: Float,
+        val config: DanmakuConfig,
+    )
+
+    @Volatile
+    private var renderState =
+        RenderState(
+            rawPositionMs = 0L,
+            isPlaying = false,
+            playWhenReady = false,
+            playbackSpeed = 1f,
+            config = defaultConfig(),
+        )
+
+    @Volatile private var canvasBackend: String = "WAIT"
+
+    // Sample Media3 and invalidate in the same main-thread vsync callback so drawing stays aligned
+    // with the window's HWUI traversal and never creates a second producer surface.
+    private var mainFrameLoopRunning: Boolean = false
+    private val mainFrameCount = AtomicLong(0L)
+    private val mainFrameCallback =
+        object : Choreographer.FrameCallback {
+            override fun doFrame(frameTimeNanos: Long) {
+                if (!mainFrameLoopRunning || !isAttachedToWindow) return
+                // Pre-arm first so work in this callback cannot make the following vsync disappear.
+                Choreographer.getInstance().postFrameCallback(this)
+                mainFrameCount.incrementAndGet()
+                samplePlaybackState()
+                invalidateDanmakuAreaNow()
+            }
+        }
+
+    init {
+        setWillNotDraw(false)
+    }
+
+    private val diagnosticTextPaint =
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = sp(13f)
+            typeface = Typeface.MONOSPACE
+        }
+    private val diagnosticBackgroundPaint =
+        Paint().apply {
+            color = 0xB3000000.toInt()
+        }
+    private var diagnosticLines: List<String> = emptyList()
+    private var diagnosticLastUpdateAtMs: Long = 0L
+    private var diagnosticLastMainFrames: Long = 0L
+    private var diagnosticLastActionFrames: Long = 0L
+    private var diagnosticDrawFrames: Long = 0L
+    private var diagnosticLastDrawFrames: Long = 0L
 
     // Keep danmaku anchored to the video edge; window insets made the first lane drift on 16:9 TVs.
     private val viewportTopInsetPx: Int = dp(2f)
@@ -49,8 +119,9 @@ class DanmakuView @JvmOverloads constructor(
     private var lastViewportBottomInset: Int = 0
 
     private var perfLastLogAtUptimeMs: Long = 0L
-    private var perfFramesSinceLog: Int = 0
+    private val perfFramesSinceLog = AtomicLong(0L)
     private var perfLogPosted: Boolean = false
+    private var perfLastMainFrames: Long = 0L
     private var perfLastFrameUpdates: Long = 0L
     private var perfLastIdleCycles: Long = 0L
     private var perfLastIdleWakes: Long = 0L
@@ -168,50 +239,54 @@ class DanmakuView @JvmOverloads constructor(
 
     fun setPositionProvider(provider: () -> Long) {
         positionProvider = provider
+        requestMainFrame()
     }
 
     fun setIsPlayingProvider(provider: () -> Boolean) {
         isPlayingProvider = provider
+        requestMainFrame()
     }
 
     fun setPlayWhenReadyProvider(provider: () -> Boolean) {
         playWhenReadyProvider = provider
+        requestMainFrame()
     }
 
     fun setPlaybackSpeedProvider(provider: () -> Float) {
         playbackSpeedProvider = provider
+        requestMainFrame()
     }
 
     fun setConfigProvider(provider: () -> DanmakuConfig) {
         configProvider = provider
+        requestMainFrame()
     }
+
+    /** Compatibility hook: a normal child View is clipped by DanmakuMaskHostLayout itself. */
+    internal fun setSurfaceClipProvider(@Suppress("UNUSED_PARAMETER") provider: ((Canvas) -> Boolean)?) = Unit
 
     fun setDanmakus(list: List<Danmaku>) {
         player.setDanmakus(list)
-        invalidate()
     }
 
     fun appendDanmakus(list: List<Danmaku>, maxItems: Int = 0, alreadySorted: Boolean = false) {
         if (list.isEmpty()) return
         player.appendDanmakus(list, maxItems = maxItems, alreadySorted = alreadySorted)
-        invalidate()
     }
 
     fun replaceDanmakusFrom(minTimeMs: Long, list: List<Danmaku>) {
         player.replaceDanmakusFrom(minTimeMs, list)
-        invalidate()
     }
 
     fun trimToTimeRange(minTimeMs: Long, maxTimeMs: Long) {
         player.trimToTimeRange(minTimeMs, maxTimeMs)
-        invalidate()
     }
 
     fun notifySeek(positionMs: Long) {
         player.seekTo(positionMs)
         lastRawPositionMs = positionMs
         lastPositionChangeUptimeMs = SystemClock.uptimeMillis()
-        invalidate()
+        requestMainFrame()
     }
 
     /** 漂移监督器（控制器侧三段式对表）使用的时钟治理入口，转发给内部 player。 */
@@ -230,9 +305,11 @@ class DanmakuView @JvmOverloads constructor(
         AppLog.i(DIAG_TAG, "view ATTACH ${width}x${height}")
         updateViewportIfNeeded()
         startPerfLoggingIfNeeded()
+        requestMainFrame()
     }
 
     override fun onDetachedFromWindow() {
+        stopMainFrameLoop()
         super.onDetachedFromWindow()
         // detach 后引擎被永久 release；若之后同实例重新 attach 而弹幕不再显示，此日志即为现场。
         AppLog.w(DIAG_TAG, "view DETACH ${width}x${height} → player.release() (irreversible)")
@@ -244,80 +321,119 @@ class DanmakuView @JvmOverloads constructor(
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         updateViewportIfNeeded()
+        updateInvalidateArea(renderState.config)
     }
+
+    internal fun renderStateSnapshot(): RenderState = renderState
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-
-        perfFramesSinceLog++
+        val diagnosticEnabled = AppLog.isEnabled
         val sampleDraw = perfDrawSampleRequested.getAndSet(false)
-        val measureDraw = debugEnabled || sampleDraw
+        val measureDraw = debugEnabled || diagnosticEnabled || sampleDraw
         val drawStartedAtNs = if (measureDraw) System.nanoTime() else 0L
-
-        fun finishDrawSample() {
-            if (!measureDraw) return
-            val drawMs = ((System.nanoTime() - drawStartedAtNs).coerceAtLeast(0L).toDouble() / 1_000_000.0).toFloat()
-            if (debugEnabled) debugStats.recordDraw(nowUptimeMs = SystemClock.uptimeMillis(), drawNs = (drawMs * 1_000_000f).toLong())
-            if (sampleDraw) {
+        canvasBackend = if (canvas.isHardwareAccelerated) "HW" else "SW"
+        player.drawViewFrame(canvas, renderState)
+        drawDiagnostics(canvas, rawPositionMs = renderState.rawPositionMs, playbackSpeed = renderState.playbackSpeed)
+        perfFramesSinceLog.incrementAndGet()
+        diagnosticDrawFrames++
+        if (measureDraw) {
+            val drawNs = (System.nanoTime() - drawStartedAtNs).coerceAtLeast(0L)
+            val drawMs = nanosToMs(drawNs)
+            if (debugEnabled || diagnosticEnabled) {
+                debugStats.recordDraw(nowUptimeMs = SystemClock.uptimeMillis(), drawNs = drawNs)
+            }
+            if (sampleDraw || diagnosticEnabled) {
                 perfLastDrawMs = drawMs
                 perfLastDrawAtUptimeMs = SystemClock.uptimeMillis()
+                perfLastLockMs = 0f
+                perfLastContentMs = drawMs
+                perfLastPostMs = 0f
             }
         }
+    }
 
-        val cfg = configProvider?.invoke() ?: defaultConfig()
+    private fun samplePlaybackState() {
+        if (!isAttachedToWindow) return
+        val cfg = runCatching { configProvider?.invoke() }.getOrNull() ?: renderState.config
         if (cfg != lastConfig) {
             lastConfig = cfg
+            updateInvalidateArea(cfg)
             player.updateConfig(cfg)
         }
-
-        updateViewportIfNeeded()
-        updateInvalidateArea(cfg)
-
-        if (!cfg.enabled) {
-            player.draw(
-                canvas = canvas,
-                rawPositionMs = 0L,
-                isPlaying = false,
-                playWhenReady = false,
-                playbackSpeed = 1f,
-                config = cfg,
-            )
-            finishDrawSample()
-            return
-        }
-
-        val posProvider = positionProvider ?: run {
-            finishDrawSample()
-            return
-        }
-        val rawPos = posProvider()
+        val rawPos = runCatching { positionProvider?.invoke() }.getOrNull() ?: lastRawPositionMs
         val now = SystemClock.uptimeMillis()
         if (lastPositionChangeUptimeMs == 0L) lastPositionChangeUptimeMs = now
         if (rawPos != lastRawPositionMs) lastPositionChangeUptimeMs = now
         lastRawPositionMs = rawPos
-
         val isPlaying =
             runCatching { isPlayingProvider?.invoke() }.getOrNull()
                 ?: (now - lastPositionChangeUptimeMs < STOP_WHEN_IDLE_MS)
-        // playWhenReady 表示"想播放"（可能正在 buffering）。后台返回时 isPlaying 尚未变 true，
-        // 但 playWhenReady 已为 true，用它驱动渲染循环避免弹幕卡死。
-        val playWhenReady =
-            runCatching { playWhenReadyProvider?.invoke() }.getOrNull()
-                ?: isPlaying
+        val playWhenReady = runCatching { playWhenReadyProvider?.invoke() }.getOrNull() ?: isPlaying
         val speed =
             runCatching { playbackSpeedProvider?.invoke() }.getOrNull()
                 ?.takeIf { it.isFinite() && it > 0f }
                 ?: 1f
+        renderState = RenderState(rawPos, isPlaying, playWhenReady, speed, cfg)
+        if (cfg.enabled && (isPlaying || playWhenReady)) {
+            player.startIfNeeded()
+        } else if (player.isStarted()) {
+            player.stop()
+        }
+        player.onMainFrameSampled()
+    }
 
-        player.draw(
-            canvas = canvas,
-            rawPositionMs = rawPos,
-            isPlaying = isPlaying,
-            playWhenReady = playWhenReady,
-            playbackSpeed = speed,
-            config = cfg,
-        )
-        finishDrawSample()
+    internal fun startMainFrameLoop() {
+        runOnMainThread {
+            if (mainFrameLoopRunning || !isAttachedToWindow) return@runOnMainThread
+            mainFrameLoopRunning = true
+            Choreographer.getInstance().postFrameCallback(mainFrameCallback)
+        }
+    }
+
+    internal fun stopMainFrameLoop() {
+        runOnMainThread {
+            if (!mainFrameLoopRunning) return@runOnMainThread
+            mainFrameLoopRunning = false
+            Choreographer.getInstance().removeFrameCallback(mainFrameCallback)
+        }
+    }
+
+    /** Request a one-shot Media3 state sample for paused operations and sparse-timeline wakeups. */
+    internal fun requestMainFrame() {
+        runOnMainThread {
+            if (isAttachedToWindow) {
+                samplePlaybackState()
+                invalidateDanmakuAreaNow()
+            }
+        }
+    }
+
+    internal fun requestRenderFrame() {
+        val w = width.coerceAtLeast(0)
+        val h = height.coerceAtLeast(0)
+        if (w <= 0 || h <= 0 || invalidateFull) {
+            postInvalidateOnAnimation()
+            return
+        }
+        val top = invalidateTopPx.coerceIn(0, h)
+        var bottom = invalidateBottomPx.coerceIn(top, h)
+        if (bottom <= top) bottom = (top + 1).coerceAtMost(h)
+        postInvalidateOnAnimation(0, top, w, bottom)
+    }
+
+    private fun invalidateDanmakuAreaNow() {
+        val w = width.coerceAtLeast(0)
+        val h = height.coerceAtLeast(0)
+        if (w <= 0 || h <= 0 || invalidateFull) {
+            invalidate()
+            return
+        }
+        val top = invalidateTopPx.coerceIn(0, h)
+        var bottom = invalidateBottomPx.coerceIn(top, h)
+        if (bottom <= top) bottom = (top + 1).coerceAtMost(h)
+        @Suppress("DEPRECATION")
+        invalidate(0, top, w, bottom)
     }
 
     private fun startPerfLoggingIfNeeded() {
@@ -326,7 +442,8 @@ class DanmakuView @JvmOverloads constructor(
         if (perfLogPosted) return
         perfLogPosted = true
         perfLastLogAtUptimeMs = 0L
-        perfFramesSinceLog = 0
+        perfFramesSinceLog.set(0L)
+        perfLastMainFrames = 0L
         perfLastFrameUpdates = 0L
         perfLastIdleCycles = 0L
         perfLastIdleWakes = 0L
@@ -358,7 +475,7 @@ class DanmakuView @JvmOverloads constructor(
         if (configProvider == null && cfg == null) return
 
         val deltaMs = if (lastAt == 0L) 0L else (now - lastAt).coerceAtLeast(0L)
-        val frames = perfFramesSinceLog.coerceAtLeast(0)
+        val frames = perfFramesSinceLog.getAndSet(0L).coerceAtLeast(0L)
         val fps =
             if (deltaMs > 0L) {
                 (frames.toFloat() * 1000f) / deltaMs.toFloat()
@@ -366,15 +483,17 @@ class DanmakuView @JvmOverloads constructor(
                 0f
             }
         perfLastLogAtUptimeMs = now
-        perfFramesSinceLog = 0
 
         val snap = player.debugSnapshot()
         val p = player.debugState()
         val sample = player.perfSample()
+        val currentMainFrames = mainFrameCount.get()
+        val mainFrames = (currentMainFrames - perfLastMainFrames).coerceAtLeast(0L)
         val actionFrames = (sample.frameUpdates - perfLastFrameUpdates).coerceAtLeast(0L)
         val idleCycles = (sample.idleCycles - perfLastIdleCycles).coerceAtLeast(0L)
         val idleWakes = (sample.idleWakes - perfLastIdleWakes).coerceAtLeast(0L)
         val idleResumes = (sample.idleResumes - perfLastIdleResumes).coerceAtLeast(0L)
+        perfLastMainFrames = currentMainFrames
         perfLastFrameUpdates = sample.frameUpdates
         perfLastIdleCycles = sample.idleCycles
         perfLastIdleWakes = sample.idleWakes
@@ -400,7 +519,9 @@ class DanmakuView @JvmOverloads constructor(
                 append(" spd=").append(String.format(Locale.US, "%.2f", playbackSpeed))
                 append(" raw=").append(rawPos).append("ms")
                 append(" smooth=").append(snap.positionMs).append("ms")
+                append(" mode=view-").append(canvasBackend).append('@').append(width).append('x').append(height)
                 append(" fps=").append(String.format(Locale.US, "%.1f", fps))
+                append(" mf=").append(mainFrames)
                 append(" af=").append(actionFrames)
                 append(" act=").append(snap.count)
                 append(" pend=").append(snap.pendingCount)
@@ -412,6 +533,10 @@ class DanmakuView @JvmOverloads constructor(
                 append(" actMs=").append(String.format(Locale.US, "%.2f", sample.actMs))
                 append(" age=").append(actAgeMs).append("ms")
                 append(" drawMs=").append(String.format(Locale.US, "%.2f", perfLastDrawMs))
+                append(" lock/content/post=")
+                    .append(formatMs(perfLastLockMs)).append('/')
+                    .append(formatMs(perfLastContentMs)).append('/')
+                    .append(formatMs(perfLastPostMs)).append("ms")
                 append(" drawAge=").append(drawAgeMs).append("ms")
                 append(" idle=").append(idleCycles).append('/').append(idleWakes).append('/').append(idleResumes)
                 append(" wake=").append(sample.lastIdleWakeDelayMs).append('/').append(sample.lastIdleWakeLatenessMs).append("ms")
@@ -424,26 +549,70 @@ class DanmakuView @JvmOverloads constructor(
         perfDrawSampleRequested.set(true)
     }
 
-    internal fun invalidateDanmakuAreaOnAnimation() {
-        val w = width.coerceAtLeast(0)
-        val h = height.coerceAtLeast(0)
-        if (w <= 0 || h <= 0) {
-            postInvalidateOnAnimation()
+    private fun drawDiagnostics(canvas: Canvas, rawPositionMs: Long, playbackSpeed: Float) {
+        if (!AppLog.isEnabled) {
+            diagnosticLines = emptyList()
+            diagnosticLastUpdateAtMs = 0L
             return
         }
-        if (invalidateFull) {
-            postInvalidateOnAnimation()
-            return
+
+        val now = SystemClock.uptimeMillis()
+        val elapsedMs = (now - diagnosticLastUpdateAtMs).coerceAtLeast(0L)
+        if (diagnosticLastUpdateAtMs == 0L || elapsedMs >= DIAGNOSTIC_UPDATE_INTERVAL_MS) {
+            val sample = player.perfSample()
+            val snapshot = player.debugSnapshot()
+            val state = player.debugState()
+            val mainFrames = mainFrameCount.get()
+            val drawFrames = diagnosticDrawFrames
+            val mainFps = calculateDanmakuFrameRate(mainFrames - diagnosticLastMainFrames, elapsedMs)
+            val actionFps = calculateDanmakuFrameRate(sample.frameUpdates - diagnosticLastActionFrames, elapsedMs)
+            val drawFps = calculateDanmakuFrameRate(drawFrames - diagnosticLastDrawFrames, elapsedMs)
+            val driftMs = snapshot.positionMs - rawPositionMs
+            val driftText = if (driftMs >= 0L) "+${driftMs}ms" else "${driftMs}ms"
+
+            diagnosticLines =
+                listOf(
+                    "Danmaku diagnostics [VIEW-$canvasBackend ${width}x${height}]",
+                    "UI ${formatFps(mainFps)}  ACT ${formatFps(actionFps)}  DRAW ${formatFps(drawFps)} fps",
+                    "act ${formatMs(sample.actMs)}ms  draw ${formatMs(perfLastDrawMs)}ms  drift $driftText",
+                    "lock/content/post ${formatMs(perfLastLockMs)}/${formatMs(perfLastContentMs)}/${formatMs(perfLastPostMs)} ms",
+                    "active ${snapshot.count}  pending ${snapshot.pendingCount}  cache ${state.cachedDrawn}/${snapshot.count}",
+                    "skip ${state.cacheMissSkipped}  queue ${state.cacheQueueDepth}  speed ${String.format(Locale.US, "%.2f", playbackSpeed)}x",
+                )
+            diagnosticLastUpdateAtMs = now
+            diagnosticLastMainFrames = mainFrames
+            diagnosticLastActionFrames = sample.frameUpdates
+            diagnosticLastDrawFrames = drawFrames
+            player.requestPerfSample()
         }
-        val top = invalidateTopPx.coerceIn(0, h)
-        var bottom = invalidateBottomPx.coerceIn(top, h)
-        if (bottom <= top) bottom = (top + 1).coerceAtMost(h)
-        postInvalidateOnAnimation(0, top, w, bottom)
+
+        if (diagnosticLines.isEmpty()) return
+        val padding = dp(8f).toFloat()
+        val left = dp(12f).toFloat()
+        val top = dp(12f).toFloat()
+        val lineHeight = diagnosticTextPaint.fontSpacing
+        val textWidth = diagnosticLines.maxOf { diagnosticTextPaint.measureText(it) }
+        val right = (left + textWidth + padding * 2f).coerceAtMost(width.toFloat())
+        val bottom = top + padding * 2f + lineHeight * diagnosticLines.size
+        canvas.drawRoundRect(left, top, right, bottom, dp(6f).toFloat(), dp(6f).toFloat(), diagnosticBackgroundPaint)
+        var baseline = top + padding - diagnosticTextPaint.fontMetrics.top
+        diagnosticLines.forEach { line ->
+            canvas.drawText(line, left + padding, baseline, diagnosticTextPaint)
+            baseline += lineHeight
+        }
+    }
+
+    private fun runOnMainThread(action: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            action()
+        } else {
+            post(action)
+        }
     }
 
     private fun updateInvalidateArea(cfg: DanmakuConfig) {
-        val w = width.coerceAtLeast(0)
-        val h = height.coerceAtLeast(0)
+        val w = logicalViewportWidth()
+        val h = logicalViewportHeight()
         if (w <= 0 || h <= 0) {
             invalidateFull = true
             invalidateTopPx = 0
@@ -464,8 +633,8 @@ class DanmakuView @JvmOverloads constructor(
     }
 
     private fun updateViewportIfNeeded() {
-        val w = width.coerceAtLeast(0)
-        val h = height.coerceAtLeast(0)
+        val w = logicalViewportWidth()
+        val h = logicalViewportHeight()
         val top = viewportTopInsetPx
         val bottom = viewportBottomInsetPx
         if (w == lastViewportW && h == lastViewportH && top == lastViewportTopInset && bottom == lastViewportBottomInset) return
@@ -476,7 +645,15 @@ class DanmakuView @JvmOverloads constructor(
         player.onViewportChanged(width = w, height = h, topInsetPx = top, bottomInsetPx = bottom)
     }
 
+    private fun logicalViewportWidth(): Int =
+        (parent as? View)?.width?.takeIf { it > 0 } ?: width.coerceAtLeast(0)
+
+    private fun logicalViewportHeight(): Int =
+        (parent as? View)?.height?.takeIf { it > 0 } ?: height.coerceAtLeast(0)
+
     private fun dp(v: Float): Int = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, resources.displayMetrics).toInt()
+
+    private fun sp(v: Float): Float = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, v, resources.displayMetrics)
 
     private fun defaultConfig(): DanmakuConfig =
         DanmakuConfig(
@@ -568,5 +745,17 @@ class DanmakuView @JvmOverloads constructor(
 
         private const val STOP_WHEN_IDLE_MS = 700L
         private const val PERF_LOG_INTERVAL_MS = 3_000L
+        private const val DIAGNOSTIC_UPDATE_INTERVAL_MS = 500L
     }
 }
+
+internal fun calculateDanmakuFrameRate(frameDelta: Long, elapsedMs: Long): Float {
+    if (frameDelta <= 0L || elapsedMs <= 0L) return 0f
+    return frameDelta.toFloat() * 1_000f / elapsedMs.toFloat()
+}
+
+private fun formatFps(value: Float): String = String.format(Locale.US, "%.1f", value)
+
+private fun formatMs(value: Float): String = String.format(Locale.US, "%.2f", value)
+
+private fun nanosToMs(value: Long): Float = (value.coerceAtLeast(0L).toDouble() / 1_000_000.0).toFloat()

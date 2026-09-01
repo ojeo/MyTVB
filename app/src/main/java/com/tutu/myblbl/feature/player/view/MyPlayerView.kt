@@ -2742,6 +2742,9 @@ class MyPlayerView @JvmOverloads constructor(
             layoutParams = FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
             isClickable = false
             isFocusable = false
+            setSurfaceClipProvider { canvas ->
+                dmkMaskHost?.applySurfaceClip(canvas) == true
+            }
         }
         dmkMaskHost?.addView(view) ?: addView(view)
         liteDanmakuView = view

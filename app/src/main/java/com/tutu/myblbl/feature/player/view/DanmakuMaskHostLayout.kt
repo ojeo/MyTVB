@@ -58,6 +58,9 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
     private val transformMatrix = Matrix()
     private val transformPath = Path()
     private val mergedPath = Path().apply { fillType = Path.FillType.WINDING }
+    private val surfaceMaskLock = Any()
+    private val surfaceMaskPath = Path().apply { fillType = Path.FillType.WINDING }
+    @Volatile private var surfaceMaskActive: Boolean = false
 
     /** 同帧去重 + 防闪烁缓存：记录上一个有效帧及其 bounds。 */
     private var cachedFrame: MaskFrame? = null
@@ -92,7 +95,18 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
         cachedFrame = null
         mergedPath.reset()
         mergedPath.fillType = Path.FillType.WINDING
+        publishSurfaceMask(enabled = false)
         postInvalidateOnAnimation()
+    }
+
+    /** Applies the latest main-thread mask snapshot to the independent danmaku Surface canvas. */
+    fun applySurfaceClip(canvas: Canvas): Boolean {
+        if (!surfaceMaskActive) return false
+        synchronized(surfaceMaskLock) {
+            if (!surfaceMaskActive || surfaceMaskPath.isEmpty) return false
+            canvas.clipPath(surfaceMaskPath)
+        }
+        return true
     }
 
     /** 保留调试入口：必要时可强制切软件层对比硬件合成差异。 */
@@ -109,7 +123,7 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
         // 1. controller 说不要渲染 → 不裁剪（仅 IDLE 状态）
         if (shouldRenderMask?.invoke() == false) {
             maybeLogMaskState("disabled", null, null, null, false)
-            super.dispatchDraw(canvas)
+            drawDanmakuWithoutMask(canvas)
             return
         }
 
@@ -118,7 +132,7 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
             val bounds = videoBoundsProvider?.invoke()
             if (bounds == null || bounds.isEmpty || cachedFrame == null || cachedFrame!!.paths.isEmpty()) {
                 maybeLogMaskState("seeking_no_cached_frame", null, cachedFrame, bounds, false)
-                super.dispatchDraw(canvas)
+                drawDanmakuWithoutMask(canvas)
                 recordMaskPerf("seeking_no_cached_frame", drawStartedAtMs, null, cachedFrame, bounds, false, false, false, 0L)
                 return
             }
@@ -144,7 +158,7 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
         // 5. bounds 无效 → 不裁剪
         if (bounds == null || bounds.isEmpty) {
             maybeLogMaskState("invalid_bounds", pts, frame, bounds, false)
-            super.dispatchDraw(canvas)
+            drawDanmakuWithoutMask(canvas)
             recordMaskPerf("invalid_bounds", drawStartedAtMs, pts, frame, bounds, false, false, false, 0L)
             return
         }
@@ -155,7 +169,7 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
             mergedPath.reset()
             mergedPath.fillType = Path.FillType.WINDING
             maybeLogMaskState("empty_paths", pts, frame, bounds, false)
-            super.dispatchDraw(canvas)
+            drawDanmakuWithoutMask(canvas)
             recordMaskPerf("empty_paths", drawStartedAtMs, pts, frame, bounds, false, false, false, 0L)
             return
         }
@@ -166,7 +180,7 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
 
         if (effectiveFrame == null || effectiveFrame.paths.isEmpty()) {
             maybeLogMaskState("no_frame", pts, effectiveFrame, bounds, false)
-            super.dispatchDraw(canvas)
+            drawDanmakuWithoutMask(canvas)
             recordMaskPerf("no_frame", drawStartedAtMs, pts, effectiveFrame, bounds, false, false, false, 0L)
             return
         }
@@ -203,13 +217,32 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
 
     private fun drawDanmakuWithMask(canvas: Canvas) {
         if (width <= 0 || height <= 0) {
-            super.dispatchDraw(canvas)
+            drawDanmakuWithoutMask(canvas)
             return
         }
+        publishSurfaceMask(enabled = true)
         val saveCount = canvas.save()
         canvas.clipPath(mergedPath)
         super.dispatchDraw(canvas)
         canvas.restoreToCount(saveCount)
+    }
+
+    private fun drawDanmakuWithoutMask(canvas: Canvas) {
+        publishSurfaceMask(enabled = false)
+        super.dispatchDraw(canvas)
+    }
+
+    private fun publishSurfaceMask(enabled: Boolean) {
+        synchronized(surfaceMaskLock) {
+            surfaceMaskActive = enabled && !mergedPath.isEmpty
+            if (surfaceMaskActive) {
+                surfaceMaskPath.set(mergedPath)
+                surfaceMaskPath.fillType = Path.FillType.WINDING
+            } else {
+                surfaceMaskPath.reset()
+                surfaceMaskPath.fillType = Path.FillType.WINDING
+            }
+        }
     }
 
     /**

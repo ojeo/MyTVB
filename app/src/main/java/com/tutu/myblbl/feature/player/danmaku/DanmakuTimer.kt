@@ -2,15 +2,15 @@ package com.tutu.myblbl.feature.player.danmaku
 
 import com.tutu.myblbl.core.common.log.AppLog
 import kotlin.math.abs
-import kotlin.math.exp
+import kotlin.math.min
 
 /**
  * AkDanmaku-style timer:
  * - Uses System.nanoTime() for smooth advancement.
  * - Prioritizes a monotonic local clock while playing for stable motion.
  * - Re-anchors hard only on explicit playback events (seek).
- * - Corrections (resume/drift/idle gaps) converge gradually instead of hard
- *   re-anchoring, so on-screen danmaku never visibly jump in a single frame.
+ * - Ordinary lag in Player.currentPosition never pulls the local clock backwards.
+ * - Only a forward media-clock gap is corrected, with a bounded extra rate.
  */
 internal class DanmakuTimer {
     @Volatile
@@ -117,30 +117,10 @@ internal class DanmakuTimer {
                     "pause-edge smooth=${smoothPositionMs.toLong()}ms raw=${raw.toLong()}ms " +
                         "rawDelta=${deltaLabel(raw - smoothPositionMs)}"
                 )
-            } else {
-                // 暂停中只允许向前纠偏（禁止回退原则不变）；由一次性硬锚改为渐进收敛，
-                // 避免暂停画面上弹幕瞬间整体前跳。
-                val forwardGap = raw - smoothPositionMs
-                if (correcting) {
-                    if (forwardGap <= CATCH_UP_TOLERANCE_MS) {
-                        correcting = false
-                        AppLog.i(
-                            DIAG_TAG,
-                            "anchor kind=idle-end gap=${deltaLabel(forwardGap)} " +
-                                "smooth=${smoothPositionMs.toLong()}ms"
-                        )
-                    } else {
-                        smoothPositionMs = convergeTo(raw, dtMs)
-                    }
-                } else if (forwardGap >= IDLE_REANCHOR_THRESHOLD_MS) {
-                    correcting = true
-                    AppLog.i(
-                        DIAG_TAG,
-                        "anchor kind=idle-begin gap=${deltaLabel(forwardGap)} " +
-                            "smooth=${smoothPositionMs.toLong()}ms raw=${raw.toLong()}ms"
-                    )
-                }
             }
+            // Paused/buffering means frozen danmaku. Do not move toward a possibly speculative
+            // decoder position while there is no presented playback progress.
+            correcting = false
             lastPlaying = false
             lastPlaybackSpeed = speed
             return smoothPositionMs.toLong()
@@ -172,22 +152,20 @@ internal class DanmakuTimer {
         }
         if (smoothPositionMs < 0.0) smoothPositionMs = 0.0
 
-        // 连续渐进追赶：吸收 resume 残留偏差与未报告漂移（原 EXTREME_DRIFT 硬锚取消）。
-        // 与漂移监督器（BlblDanmakuController 三段式）的分工：死区(250ms)内维持
-        // "不动"语义；超过死区由本体的指数收敛快速对齐（±5% 软同步每秒仅收敛 5%，
-        // 对缓冲/暂停恢复残留太慢）；超过硬阈值的 seek 重建仍由监督器主导，本收敛
-        // 只是其去抖窗口内的平滑过渡。
+        // Player.currentPosition is a sampled media clock and can temporarily stall by 250ms even
+        // while playback is healthy. Pulling the smooth clock backwards in response produced the
+        // observed periodic freeze/jump. Correct only when the media clock is genuinely ahead.
         val gap = raw - smoothPositionMs
-        if (!correcting && abs(gap) >= CATCH_UP_ENGAGE_GAP_MS) {
+        if (!correcting && gap >= CATCH_UP_ENGAGE_GAP_MS) {
             correcting = true
             AppLog.i(
                 DIAG_TAG,
-                "anchor kind=catchup-begin gap=${deltaLabel(gap)} " +
+                "anchor kind=catchup-forward-begin gap=${deltaLabel(gap)} " +
                     "smooth=${smoothPositionMs.toLong()}ms raw=${raw.toLong()}ms"
             )
         }
         if (correcting) {
-            runCatchUp(raw, dtMs)
+            runForwardCatchUp(raw, dtMs, speed)
         }
 
         lastPlaying = true
@@ -195,16 +173,10 @@ internal class DanmakuTimer {
         return smoothPositionMs.toLong()
     }
 
-    /**
-     * 将平滑位置向 raw 渐进收敛（指数衰减，时间常数 [CATCH_UP_TIME_CONSTANT_MS]），
-     * 偏差收敛到 [CATCH_UP_TOLERANCE_MS] 内吸合并结束本次追赶。
-     * 偏差超过 [HARD_REANCHOR_GAP_MS] 时退回一次性硬锚——数秒级的未报告跳变若用
-     * 指数收敛，弹幕会长时间数倍速快进，观感反而差于直接跳变。
-     * 回退方向的收敛由引擎 stepTime 的单调钳制吸收（在屏弹幕冻结等 raw 追上）。
-     */
-    private fun runCatchUp(raw: Double, deltaMs: Double) {
+    /** Forward-only bounded correction; never freezes or rewinds on a stale raw sample. */
+    private fun runForwardCatchUp(raw: Double, deltaMs: Double, speed: Double) {
         val gap = raw - smoothPositionMs
-        if (abs(gap) >= HARD_REANCHOR_GAP_MS) {
+        if (gap >= HARD_REANCHOR_GAP_MS) {
             val before = smoothPositionMs
             smoothPositionMs = raw
             correcting = false
@@ -215,27 +187,17 @@ internal class DanmakuTimer {
             )
             return
         }
-        smoothPositionMs = convergeTo(raw, deltaMs)
-        if (abs(raw - smoothPositionMs) <= CATCH_UP_TOLERANCE_MS) {
+        if (gap <= CATCH_UP_TOLERANCE_MS) {
             correcting = false
             AppLog.i(
                 DIAG_TAG,
-                "anchor kind=catchup-end gap=${deltaLabel(raw - smoothPositionMs)} " +
+                "anchor kind=catchup-forward-end gap=${deltaLabel(gap)} " +
                     "smooth=${smoothPositionMs.toLong()}ms"
             )
+            return
         }
-    }
-
-    /**
-     * 将平滑位置向目标 target 渐进收敛：以指数衰减速率逼近，避免把 raw 的一次性
-     * 偏差放大成"所有弹幕同帧整体跳变"；偏差小于 [CATCH_UP_TOLERANCE_MS] 时直接吸合。
-     */
-    private fun convergeTo(target: Double, deltaMs: Double): Double {
-        val diff = target - smoothPositionMs
-        if (!diff.isFinite()) return target
-        if (abs(diff) <= CATCH_UP_TOLERANCE_MS) return target
-        val rate = 1.0 - exp(-deltaMs.coerceAtLeast(0.0) / CATCH_UP_TIME_CONSTANT_MS)
-        return smoothPositionMs + diff * rate
+        val maxCorrectionMs = deltaMs.coerceAtLeast(0.0) * speed * MAX_FORWARD_CORRECTION_RATE
+        smoothPositionMs += min(gap - CATCH_UP_TOLERANCE_MS, maxCorrectionMs)
     }
 
     private fun deltaLabel(delta: Double): String =
@@ -250,15 +212,15 @@ internal class DanmakuTimer {
     private companion object {
         private const val DIAG_TAG = "BlblDmDiag"
 
-        private const val IDLE_REANCHOR_THRESHOLD_MS = 120.0
         private const val SPEED_CHANGE_EPSILON = 0.0001
 
-        // 渐进追赶触发阈值：对齐漂移监督器死区（DRIFT_NEUTRAL_TOLERANCE_MS = 250ms）。
+        // Only a forward media-clock lead can start correction. A negative gap is commonly a
+        // transient stale Player.currentPosition sample and must never slow/freeze danmaku.
         private const val CATCH_UP_ENGAGE_GAP_MS = 250.0
-        // 偏差收敛到该值内直接吸合（肉眼看不出跳变）。
         private const val CATCH_UP_TOLERANCE_MS = 30.0
-        // 收敛时间常数（ms）：单帧(~16ms)收敛约 5%，300ms 收敛约 63%，1s 收敛约 96%。
-        private const val CATCH_UP_TIME_CONSTANT_MS = 300.0
+        // Cap correction to +10% motion. Unlike exponential catch-up, the first corrected frame
+        // cannot jump by a large fraction of the accumulated gap.
+        private const val MAX_FORWARD_CORRECTION_RATE = 0.10
         // 超过该偏差退回一次性硬锚（监督器 >2s 的 seek 重建通常已介入，此处为兜底）。
         private const val HARD_REANCHOR_GAP_MS = 5_000.0
     }
