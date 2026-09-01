@@ -60,8 +60,8 @@ class AdaptiveOnScreenLimitTest {
         val c = AdaptiveOnScreenLimit(SEED, FLOOR, CEILING, REFRESH)
         assertNull(feedWindow(c, FAST_INTERVAL, act = SEED))
         assertEquals(SEED, c.limit)
-        // 第二个连续健康窗口：确认上调一个步长
-        assertEquals(SEED + 16, feedWindow(c, FAST_INTERVAL, act = SEED))
+        // 第二个连续健康窗口：确认上调一个步长（DEFAULT_STEP_UP 已从 16 调为 32）
+        assertEquals(SEED + 32, feedWindow(c, FAST_INTERVAL, act = SEED))
     }
 
     @Test

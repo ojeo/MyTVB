@@ -58,6 +58,13 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
     private val transformMatrix = Matrix()
     private val transformPath = Path()
     private val mergedPath = Path().apply { fillType = Path.FillType.WINDING }
+    // GPU 弹幕引擎消费的 mask 快照：主线程在 dispatchDraw 发布，RenderThread 读取。
+    private val surfaceMaskLock = Any()
+    private val surfaceMaskPath = Path().apply { fillType = Path.FillType.WINDING }
+    @Volatile private var surfaceMaskActive = false
+    /** 自增版本号：GPU 弹幕引擎据此检测 mask 变化（@Volatile 跨线程可见）。 */
+    @Volatile var surfaceMaskVersion = 0
+        private set
 
     /** 同帧去重 + 防闪烁缓存：记录上一个有效帧及其 bounds。 */
     private var cachedFrame: MaskFrame? = null
@@ -92,6 +99,7 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
         cachedFrame = null
         mergedPath.reset()
         mergedPath.fillType = Path.FillType.WINDING
+        publishSurfaceMask(enabled = false)
         postInvalidateOnAnimation()
     }
 
@@ -109,7 +117,7 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
         // 1. controller 说不要渲染 → 不裁剪（仅 IDLE 状态）
         if (shouldRenderMask?.invoke() == false) {
             maybeLogMaskState("disabled", null, null, null, false)
-            super.dispatchDraw(canvas)
+            drawDanmakuWithoutMask(canvas)
             return
         }
 
@@ -118,7 +126,7 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
             val bounds = videoBoundsProvider?.invoke()
             if (bounds == null || bounds.isEmpty || cachedFrame == null || cachedFrame!!.paths.isEmpty()) {
                 maybeLogMaskState("seeking_no_cached_frame", null, cachedFrame, bounds, false)
-                super.dispatchDraw(canvas)
+                drawDanmakuWithoutMask(canvas)
                 recordMaskPerf("seeking_no_cached_frame", drawStartedAtMs, null, cachedFrame, bounds, false, false, false, 0L)
                 return
             }
@@ -144,7 +152,7 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
         // 5. bounds 无效 → 不裁剪
         if (bounds == null || bounds.isEmpty) {
             maybeLogMaskState("invalid_bounds", pts, frame, bounds, false)
-            super.dispatchDraw(canvas)
+            drawDanmakuWithoutMask(canvas)
             recordMaskPerf("invalid_bounds", drawStartedAtMs, pts, frame, bounds, false, false, false, 0L)
             return
         }
@@ -155,7 +163,7 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
             mergedPath.reset()
             mergedPath.fillType = Path.FillType.WINDING
             maybeLogMaskState("empty_paths", pts, frame, bounds, false)
-            super.dispatchDraw(canvas)
+            drawDanmakuWithoutMask(canvas)
             recordMaskPerf("empty_paths", drawStartedAtMs, pts, frame, bounds, false, false, false, 0L)
             return
         }
@@ -166,7 +174,7 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
 
         if (effectiveFrame == null || effectiveFrame.paths.isEmpty()) {
             maybeLogMaskState("no_frame", pts, effectiveFrame, bounds, false)
-            super.dispatchDraw(canvas)
+            drawDanmakuWithoutMask(canvas)
             recordMaskPerf("no_frame", drawStartedAtMs, pts, effectiveFrame, bounds, false, false, false, 0L)
             return
         }
@@ -203,13 +211,43 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
 
     private fun drawDanmakuWithMask(canvas: Canvas) {
         if (width <= 0 || height <= 0) {
-            super.dispatchDraw(canvas)
+            drawDanmakuWithoutMask(canvas)
             return
         }
+        publishSurfaceMask(enabled = true)
         val saveCount = canvas.save()
         canvas.clipPath(mergedPath)
         super.dispatchDraw(canvas)
         canvas.restoreToCount(saveCount)
+    }
+
+    private fun drawDanmakuWithoutMask(canvas: Canvas) {
+        publishSurfaceMask(enabled = false)
+        super.dispatchDraw(canvas)
+    }
+
+    /**
+     * 把当前 mergedPath 快照发布到共享字段，供独立 Surface 的 GPU 弹幕引擎消费。
+     * 必须与 dispatchDraw 同线程（主线程）调用，避免 Path 读写竞态；
+     * [surfaceMaskVersion] 为 @Volatile 自增版本号，RenderThread 据此检测变化。
+     */
+    private fun publishSurfaceMask(enabled: Boolean) {
+        synchronized(surfaceMaskLock) {
+            surfaceMaskActive = enabled && !mergedPath.isEmpty
+            surfaceMaskPath.reset()
+            surfaceMaskPath.fillType = Path.FillType.WINDING
+            if (surfaceMaskActive) surfaceMaskPath.set(mergedPath)
+            surfaceMaskVersion++
+        }
+    }
+
+    /** GPU 弹幕引擎读取最新 mask 快照；返回 false 表示当前无遮挡（无需裁剪）。 */
+    fun readSurfaceMask(out: Path): Boolean {
+        synchronized(surfaceMaskLock) {
+            if (!surfaceMaskActive || surfaceMaskPath.isEmpty) return false
+            out.set(surfaceMaskPath)
+            return true
+        }
     }
 
     /**

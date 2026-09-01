@@ -40,6 +40,7 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import androidx.media3.ui.AspectRatioFrameLayout
 import com.tutu.myblbl.R
 import com.tutu.myblbl.core.common.log.AppLog
@@ -56,12 +57,16 @@ import com.tutu.myblbl.feature.player.LiveLineInfo
 import com.tutu.myblbl.feature.player.LiveQualityInfo
 import com.tutu.myblbl.feature.player.PlaybackStartupTrace
 import com.tutu.myblbl.feature.player.danmaku.BlblDanmakuController
+import com.tutu.myblbl.feature.player.danmaku.DanmakuRenderHost
+import com.tutu.myblbl.feature.player.danmaku.DanmakuRenderMode
 import com.tutu.myblbl.feature.player.danmaku.DanmakuView
+import com.tutu.myblbl.feature.player.danmaku.render.GlDanmakuView
 import com.tutu.myblbl.feature.player.danmaku.common.DanmakuSettingsSnapshot
 import com.tutu.myblbl.feature.player.danmaku.common.DanmakuController
 import com.tutu.myblbl.feature.player.danmaku.common.LiveDanmakuController
 import com.tutu.myblbl.feature.player.DanmakuFilterContext
 import com.tutu.myblbl.feature.player.sponsor.SponsorSegment
+import kotlin.jvm.Volatile
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -108,6 +113,7 @@ class MyPlayerView @JvmOverloads constructor(
         private const val KEYCODE_SYSTEM_NAVIGATION_RIGHT_COMPAT = 283
         private const val STARTUP_BUFFERING_INDICATOR_DELAY_MS = 700L
         private const val REBUFFER_BUFFERING_INDICATOR_DELAY_MS = 150L
+        private const val VIDEO_FPS_WINDOW_MS = 500L
         private const val DM_MASK_STARTUP_LOAD_DELAY_MS = 1500L
         private const val SHUTTER_FADE_DURATION_MS = 180L
         private const val SHUTTER_TIMEOUT_MS = 8_000L
@@ -226,14 +232,44 @@ class MyPlayerView @JvmOverloads constructor(
     private val gestureDetector = GestureDetector(context, gestureListener)
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
 
-    // 性能优先弹幕引擎（唯一引擎）。由 setupDanmakuEngine() 创建并挂到蒙版宿主。
-    private var liteDanmakuView: DanmakuView? = null
+    // 弹幕渲染后端模式：GPU 优先（默认），EGL 失败自动降级 Canvas。
+    var danmakuRenderMode: DanmakuRenderMode = DanmakuRenderMode.GL
+    @Volatile private var glDanmakuFailed = false
+
+    /** 切换弹幕渲染后端（GPU / Canvas），下次创建弹幕引擎时生效。 */
+    fun switchDanmakuRenderMode(mode: DanmakuRenderMode) {
+        if (danmakuRenderMode == mode) return
+        danmakuRenderMode = mode
+        glDanmakuFailed = false
+    }
+
+    private fun resolveDanmakuRenderMode(): DanmakuRenderMode =
+        if (glDanmakuFailed) DanmakuRenderMode.CANVAS else danmakuRenderMode
+
+    // 弹幕渲染宿主（GPU 或 Canvas），由 setupDanmakuEngine() 创建并挂到蒙版宿主。
+    private var liteDanmakuView: DanmakuRenderHost? = null
     private var liteDanmakuController: BlblDanmakuController? = null
+
+    // ---- 视频渲染帧率统计（Debug Overlay 用）：VideoFrameMetadataListener 每帧渲染前回调计数 ----
+    @Volatile private var videoFps = 0f
+    private var videoFrameCount = 0L
+    private var videoFrameWindowStartMs = 0L
+    private val videoFrameListener = VideoFrameMetadataListener { _, _, _, _ ->
+        val now = SystemClock.elapsedRealtime()
+        if (videoFrameWindowStartMs == 0L) videoFrameWindowStartMs = now
+        videoFrameCount++
+        val elapsed = now - videoFrameWindowStartMs
+        if (elapsed >= VIDEO_FPS_WINDOW_MS) {
+            videoFps = videoFrameCount * 1000f / elapsed
+            videoFrameCount = 0L
+            videoFrameWindowStartMs = now
+        }
+    }
     private val dmMaskController = DmMaskController(
         maskHostProvider = { dmkMaskHost },
         repository = DmMaskRepository()
     ).also {
-        it.playerPositionProvider = { player?.currentPosition ?: 0L }
+        it.playerPositionProvider = { playerPositionMs }
     }
 
     private fun activeDanmakuController(): DanmakuController? = liteDanmakuController
@@ -244,6 +280,8 @@ class MyPlayerView @JvmOverloads constructor(
     private var lastUiFrameTimeNs = 0L
     private val uiFrameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNs: Long) {
+            // 主线程缓存播放位置（跨线程安全；GPU 弹幕 RenderThread 通过该字段读媒体时钟）。
+            playerPositionMs = player?.currentPosition ?: 0L
             val lastFrameTimeNs = lastUiFrameTimeNs
             if (lastFrameTimeNs > 0L && player?.isPlaying == true) {
                 val intervalMs = (frameTimeNs - lastFrameTimeNs) / 1_000_000L
@@ -264,6 +302,14 @@ class MyPlayerView @JvmOverloads constructor(
     private var swipeSeekStartPositionMs = 0L
     private var swipeSeekTargetPositionMs = 0L
     private var hasRenderedFirstFrame = false
+
+    /**
+     * 主线程缓存的播放位置（volatile 跨线程安全）。
+     * 由 [uiFrameCallback] 在主线程定期读取 player.currentPosition 更新，
+     * 供任意线程的弹幕/蒙版位置提供者读取。GPU 弹幕引擎的 RenderThread
+     * 禁止直接调 player.currentPosition（Media3 线程检查），必须经此缓存。
+     */
+    @Volatile private var playerPositionMs: Long = 0L
 
     /**
      * 后台主动 detach 标志位。
@@ -764,6 +810,7 @@ class MyPlayerView @JvmOverloads constructor(
     fun setPlayer(player: ExoPlayer?) {
         val previousPlayer = this.player
         previousPlayer?.removeListener(componentListener)
+        previousPlayer?.clearVideoFrameMetadataListener(videoFrameListener)
         when (val surfaceView = videoSurfaceView) {
             is SurfaceView -> previousPlayer?.clearVideoSurfaceView(surfaceView)
             is TextureView -> previousPlayer?.clearVideoTextureView(surfaceView)
@@ -774,6 +821,7 @@ class MyPlayerView @JvmOverloads constructor(
         this.player = player
         updateVideoFrameRateStrategy(buildDanmakuSettingsSnapshot().enabled)
         player?.addListener(componentListener)
+        player?.setVideoFrameMetadataListener(videoFrameListener)
         // player 切换会带来新的播放参数，立即同步当前速度，避免 mask 在拿到首个
         // PARAMETERS_CHANGED 事件前用旧速度推算。
         player?.let {
@@ -2641,6 +2689,7 @@ class MyPlayerView @JvmOverloads constructor(
         controller?.clearVideoSettingChangeListener()
         val currentPlayer = player
         currentPlayer?.removeListener(componentListener)
+        currentPlayer?.clearVideoFrameMetadataListener(videoFrameListener)
         when (val surfaceView = videoSurfaceView) {
             is SurfaceView -> currentPlayer?.clearVideoSurfaceView(surfaceView)
             is TextureView -> currentPlayer?.clearVideoTextureView(surfaceView)
@@ -2649,7 +2698,7 @@ class MyPlayerView @JvmOverloads constructor(
         handler.removeCallbacksAndMessages(null)
         stopUiFrameMonitor()
         liteDanmakuController?.release()
-        liteDanmakuView?.let { view -> (view.parent as? ViewGroup)?.removeView(view) }
+        liteDanmakuView?.renderView?.let { view -> (view.parent as? ViewGroup)?.removeView(view) }
         liteDanmakuView = null
         liteDanmakuController = null
         dmMaskController.dispose()
@@ -2732,21 +2781,33 @@ class MyPlayerView @JvmOverloads constructor(
     }
 
     /**
-     * 创建弹幕引擎（性能优先轻量引擎，唯一实现）。需在 setData 之前、播放器 setup 时调用，
+     * 创建弹幕引擎（GPU 优先，EGL 失败自动降级 Canvas）。需在 setData 之前、播放器 setup 时调用，
      * 保证引擎收到播放起始位置/首帧等早期通知；幂等，可安全重复调用。
-     * 引擎作为蒙版宿主的子层，防挡蒙版独立于弹幕渲染。
+     * 引擎作为蒙版宿主的子层；GPU 引擎为独立 Surface（位于视频之上、UI 层之下），
+     * 防挡蒙版（View 层 clipPath）对其不生效，V1 不做 GPU 蒙版裁剪。
      */
     fun setupDanmakuEngine() {
         if (liteDanmakuController != null) return
-        val view = DanmakuView(context).apply {
-            layoutParams = FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
-            isClickable = false
-            isFocusable = false
-        }
-        dmkMaskHost?.addView(view) ?: addView(view)
+        val view: DanmakuRenderHost =
+            when (resolveDanmakuRenderMode()) {
+                DanmakuRenderMode.GL ->
+                    GlDanmakuView(context).also {
+                        it.onEglFailed = { glDanmakuFailed = true }
+                        // GPU 弹幕引擎的防挡蒙版：消费 maskHost 发布的 path 快照。
+                        it.maskHostProvider = { dmkMaskHost }
+                        // Debug Overlay 的视频 FPS：来自播放器 VideoFrameMetadataListener 统计。
+                        it.videoFpsProvider = { videoFps }
+                    }
+                DanmakuRenderMode.CANVAS -> DanmakuView(context)
+            }
+        val renderView = view.renderView
+        renderView.layoutParams = FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
+        renderView.isClickable = false
+        renderView.isFocusable = false
+        dmkMaskHost?.addView(renderView) ?: addView(renderView)
         liteDanmakuView = view
         liteDanmakuController = BlblDanmakuController(context) { liteDanmakuView }.also {
-            it.playerPositionProvider = { player?.currentPosition ?: 0L }
+            it.playerPositionProvider = { playerPositionMs }
         }
         restoreOverlayZOrder()
     }

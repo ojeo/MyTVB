@@ -1076,12 +1076,26 @@ internal class DanmakuEngine(
     }
 
     private fun writableSnapshot(): RenderSnapshot {
+        var spins = 0
         while (true) {
             val published = latestSnapshot
             for (candidate in snapshots) {
                 if (candidate !== published && candidate.tryBeginWrite()) return candidate
             }
-            Thread.yield()
+            // 消费端持有读租约过久（慢 TV/掉帧）时，纯 yield 会让 action 线程空转烧 CPU，
+            // 反而加剧掉帧。超过自旋上限后改为短睡退避。
+            if (++spins > SNAPSHOT_WRITE_SPIN_LIMIT) {
+                try {
+                    Thread.sleep(SNAPSHOT_WRITE_BACKOFF_MS)
+                } catch (_: InterruptedException) {
+                    // 线程被中断（release 路径）：恢复中断位，回退为 yield 自旋，
+                    // 等待快照可写或线程自然退出，不 sleep（避免中断后 sleep 反复抛异常）。
+                    Thread.currentThread().interrupt()
+                    spins = 0
+                }
+            } else {
+                Thread.yield()
+            }
         }
     }
 
@@ -1916,8 +1930,11 @@ internal class DanmakuEngine(
         pxNew: Float,
         marginPx: Float,
     ): Boolean {
-        // 尚未有可绘制缓存的前一条弹幕仍占用轨道；它开始运动前不能在后面塞新弹幕。
-        if (!front.motionStarted) return false
+        // 尚未有可绘制缓存的前一条弹幕仍占用轨道；但等缓存超过 CACHE_BLOCK_LANE_TIMEOUT_MS
+        // 仍不放行会堵死整条轨道，超时后允许后车跟入。
+        if (!front.motionStarted) {
+            if (nowMs - front.startTimeMs < CACHE_BLOCK_LANE_TIMEOUT_MS) return false
+        }
         val elapsedPrev = nowMs - front.startTimeMs
         val prevRemaining = front.durationMs - elapsedPrev
         if (prevRemaining <= 0) return true
@@ -2115,15 +2132,24 @@ internal class DanmakuEngine(
         private const val MAX_CACHE_QUEUE_DEPTH = 48
         private const val MAX_CACHE_WAIT_MS = 1_600
 
+        /** 无图前车堵轨道的放行等待时间：等缓存超过该时长后允许后车跟入。 */
+        private const val CACHE_BLOCK_LANE_TIMEOUT_MS = 300
+
+        /** writableSnapshot 自旋上限：超过后从 yield 转为短睡，避免 action 线程空转烧 CPU。 */
+        private const val SNAPSHOT_WRITE_SPIN_LIMIT = 200
+        private const val SNAPSHOT_WRITE_BACKOFF_MS = 1L
+
         /** 建图失败（预算耗尽）后的重试退避：给释放路径时间回填位图池。 */
         private const val CACHE_FAIL_RETRY_BACKOFF_MS = 250
 
         /**
          * 同屏弹幕数上限自适应档：种子值（自适应会按帧率在 [ADAPTIVE_FLOOR]～
          * [ADAPTIVE_CEILING] 间自动增减，见 AdaptiveOnScreenLimit）。
+         * 相比旧值（TV 100 / 其他 160）上调，缓解"弹幕变稀"的体感；GPU 引擎能力更强，
+         * 可承担更高同屏（自适应仍会按渲染帧率自动下调兜底）。
          */
-        private const val DEFAULT_TV_MAX_ON_SCREEN = 100
-        private const val DEFAULT_MAX_ON_SCREEN = 160
+        private const val DEFAULT_TV_MAX_ON_SCREEN = 140
+        private const val DEFAULT_MAX_ON_SCREEN = 200
 
         /** 自适应同屏上限的下限/硬顶。 */
         private const val ADAPTIVE_FLOOR = 100

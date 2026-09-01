@@ -15,8 +15,10 @@ import java.util.Locale
 class DanmakuView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
-) : View(context, attrs) {
+) : View(context, attrs), DanmakuRenderHost {
     private val player = DanmakuPlayer(this)
+
+    override val renderView: View get() = this
 
     private var positionProvider: (() -> Long)? = null
     private var isPlayingProvider: (() -> Boolean)? = null
@@ -116,7 +118,7 @@ class DanmakuView @JvmOverloads constructor(
         val drawMaxMs: Float,
     )
 
-    fun setDebugEnabled(enabled: Boolean) {
+    override fun setDebugEnabled(enabled: Boolean) {
         if (debugEnabled == enabled) return
         debugEnabled = enabled
         debugStats.reset()
@@ -166,48 +168,48 @@ class DanmakuView @JvmOverloads constructor(
         )
     }
 
-    fun setPositionProvider(provider: () -> Long) {
+    override fun setPositionProvider(provider: () -> Long) {
         positionProvider = provider
     }
 
-    fun setIsPlayingProvider(provider: () -> Boolean) {
+    override fun setIsPlayingProvider(provider: () -> Boolean) {
         isPlayingProvider = provider
     }
 
-    fun setPlayWhenReadyProvider(provider: () -> Boolean) {
+    override fun setPlayWhenReadyProvider(provider: () -> Boolean) {
         playWhenReadyProvider = provider
     }
 
-    fun setPlaybackSpeedProvider(provider: () -> Float) {
+    override fun setPlaybackSpeedProvider(provider: () -> Float) {
         playbackSpeedProvider = provider
     }
 
-    fun setConfigProvider(provider: () -> DanmakuConfig) {
+    override fun setConfigProvider(provider: () -> DanmakuConfig) {
         configProvider = provider
     }
 
-    fun setDanmakus(list: List<Danmaku>) {
+    override fun setDanmakus(list: List<Danmaku>) {
         player.setDanmakus(list)
         invalidate()
     }
 
-    fun appendDanmakus(list: List<Danmaku>, maxItems: Int = 0, alreadySorted: Boolean = false) {
+    override fun appendDanmakus(list: List<Danmaku>, maxItems: Int, alreadySorted: Boolean) {
         if (list.isEmpty()) return
         player.appendDanmakus(list, maxItems = maxItems, alreadySorted = alreadySorted)
         invalidate()
     }
 
-    fun replaceDanmakusFrom(minTimeMs: Long, list: List<Danmaku>) {
+    override fun replaceDanmakusFrom(minTimeMs: Long, list: List<Danmaku>) {
         player.replaceDanmakusFrom(minTimeMs, list)
         invalidate()
     }
 
-    fun trimToTimeRange(minTimeMs: Long, maxTimeMs: Long) {
+    override fun trimToTimeRange(minTimeMs: Long, maxTimeMs: Long) {
         player.trimToTimeRange(minTimeMs, maxTimeMs)
         invalidate()
     }
 
-    fun notifySeek(positionMs: Long) {
+    override fun notifySeek(positionMs: Long) {
         player.seekTo(positionMs)
         lastRawPositionMs = positionMs
         lastPositionChangeUptimeMs = SystemClock.uptimeMillis()
@@ -215,13 +217,13 @@ class DanmakuView @JvmOverloads constructor(
     }
 
     /** 漂移监督器（控制器侧三段式对表）使用的时钟治理入口，转发给内部 player。 */
-    fun updateDanmakuTimeFactor(factor: Float) {
+    override fun updateDanmakuTimeFactor(factor: Float) {
         player.updateTimeFactor(factor)
     }
 
-    fun currentDanmakuPositionMs(): Long = player.currentDanmakuPositionMs()
+    override fun currentDanmakuPositionMs(): Long = player.currentDanmakuPositionMs()
 
-    fun syncDanmakuTimerTo(positionMs: Long) {
+    override fun syncDanmakuTimerTo(positionMs: Long) {
         player.syncTimerTo(positionMs)
     }
 
