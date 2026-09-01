@@ -61,15 +61,14 @@ class BlblDanmakuController(
         private const val LIVE_EMIT_BATCH_MS = 50L
         private const val TAIL_PATCH_MERGE_WINDOW_MS = 2_000
 
-        // ---- 漂移监督器（三段式对表，阈值沿用已移除功能向引擎的线上值）----
-        /** 对表周期：电视端 1.5s，软同步收敛速率 ≈ 33ms/s（5% × 1.5s 拍间隔内持续生效）。 */
-        private const val DRIFT_SYNC_INTERVAL_MS = 1_500L
-        /** 死区：偏差在此以内完全忽略，弹幕按原速走。 */
-        private const val DRIFT_NEUTRAL_TOLERANCE_MS = 250L
-        /** 硬阈值：超过才考虑硬校准（DanmakuTimer 自身的 2s 硬重锚作为最后保险）。 */
+        // ---- 漂移监督器（硬校准兜底；常规收敛由 DanmakuTimer 连续完成，见 docs §9.7 P1）----
+        // 历史：监督器曾用"1.5s 粗采样 + 死区外满量程 ±5%（bang-bang）"做软同步，
+        // 与 DanmakuTimer 的连续收敛（convergeTo）形成双控制器互斗 → 弹幕周期性变速/跳变。
+        // 现收敛为单一控制器：监督器只保留 >2s 的硬校准兜底，[0, 2s] 全部交给 timer。
+        /** 对表周期：400ms 一拍（仅硬校准看门狗用）。 */
+        private const val DRIFT_SYNC_INTERVAL_MS = 400L
+        /** 硬阈值：超过才考虑硬校准（DanmakuTimer 自身的 5s 硬重锚 HARD_REANCHOR_GAP_MS 作为最后保险）。 */
         private const val DRIFT_HARD_SYNC_THRESHOLD_MS = 2_000L
-        /** 软同步修正幅度。 */
-        private const val DRIFT_SOFT_CORRECTION = 0.05f
         /** 硬校准去抖：连续 N 拍超阈值才执行，排除卡顿期偶发偏差。 */
         private const val DRIFT_HARD_SYNC_DEBOUNCE = 3
     }
@@ -479,45 +478,37 @@ class BlblDanmakuController(
         val view = viewProvider() ?: return
         val videoPos = playerPositionProvider?.invoke()?.coerceAtLeast(0L) ?: return
         val enginePos = view.currentDanmakuPositionMs()
-        val signedDrift = enginePos - videoPos
-        val absDrift = abs(signedDrift)
-        when {
-            absDrift > DRIFT_HARD_SYNC_THRESHOLD_MS -> {
-                consecutiveHardSyncCount++
-                if (consecutiveHardSyncCount >= DRIFT_HARD_SYNC_DEBOUNCE) {
-                    AppLog.w(
-                        TAG,
-                        "drift hard sync engine=${enginePos}ms video=${videoPos}ms " +
-                            "delta=${signedDrift}ms backward=${signedDrift > 0}"
-                    )
-                    consecutiveHardSyncCount = 0
-                    view.updateDanmakuTimeFactor(1f)
-                    if (signedDrift > 0) {
-                        // 引擎超前：轻量校准，回退被引擎单调钳制吸收（在屏弹幕冻结等追上）。
-                        view.syncDanmakuTimerTo(videoPos)
-                    } else {
-                        // 引擎落后：完整 seek 重建（与用户 seek 同路径）。
-                        view.notifySeek(videoPos)
-                    }
-                } else {
-                    // 未达去抖阈值：先软纠正过渡，给卡顿恢复留时间，避免偶发偏差直接硬校准。
-                    view.updateDanmakuTimeFactor(softCorrectionFor(signedDrift))
-                }
-            }
-            absDrift > DRIFT_NEUTRAL_TOLERANCE_MS -> {
-                consecutiveHardSyncCount = 0
-                view.updateDanmakuTimeFactor(softCorrectionFor(signedDrift))
-            }
-            else -> {
+        // 符号约定：engineLeadMs > 0 = 引擎领先视频，< 0 = 引擎落后。
+        // 注意与 DanmakuTimer 内部 gap = raw - smooth（视频 - 引擎）符号相反，
+        // 两者是同一偏差的两个视角（docs §9.4 的符号陷阱），此处统一注释避免维护时改错方向。
+        val engineLeadMs = enginePos - videoPos
+        val absDrift = abs(engineLeadMs)
+        if (absDrift > DRIFT_HARD_SYNC_THRESHOLD_MS) {
+            consecutiveHardSyncCount++
+            if (consecutiveHardSyncCount >= DRIFT_HARD_SYNC_DEBOUNCE) {
+                AppLog.w(
+                    TAG,
+                    "drift hard sync engine=${enginePos}ms video=${videoPos}ms " +
+                        "delta=${engineLeadMs}ms backward=${engineLeadMs > 0}"
+                )
                 consecutiveHardSyncCount = 0
                 view.updateDanmakuTimeFactor(1f)
+                if (engineLeadMs > 0) {
+                    // 引擎超前：轻量校准，回退被引擎单调钳制吸收（在屏弹幕冻结等追上）。
+                    view.syncDanmakuTimerTo(videoPos)
+                } else {
+                    // 引擎落后：完整 seek 重建（与用户 seek 同路径）。
+                    view.notifySeek(videoPos)
+                }
             }
+            // 未达去抖阈值：本轮不动，等下一拍继续计数；常规收敛由 DanmakuTimer 连续完成。
+        } else {
+            // [0, 2s] 的常规偏差全部交给 DanmakuTimer 的连续收敛（convergeTo），
+            // 监督器不再做软同步——避免双控制器互斗导致弹幕周期性变速/跳变（docs §9.4 / §9.7 P1）。
+            consecutiveHardSyncCount = 0
+            view.updateDanmakuTimeFactor(1f)
         }
     }
-
-    /** 引擎超前 → 放慢 5%；落后 → 加快 5%。只作用于 timer 的软同步因子，不触发重锚。 */
-    private fun softCorrectionFor(signedDrift: Long): Float =
-        if (signedDrift > 0) 1f - DRIFT_SOFT_CORRECTION else 1f + DRIFT_SOFT_CORRECTION
 
     override fun release() {
         stop()

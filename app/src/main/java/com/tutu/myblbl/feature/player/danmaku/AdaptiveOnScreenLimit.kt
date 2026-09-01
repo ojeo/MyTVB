@@ -111,8 +111,8 @@ internal class AdaptiveOnScreenLimit(
         /** 调整判定窗口（毫秒）。 */
         const val DEFAULT_WINDOW_MS = 2_500L
 
-        /** 单次上调步长（条）。 */
-        const val DEFAULT_STEP_UP = 16
+        /** 单次上调步长（条）。原 16 → 32：从 140 爬到 200 由 ~5 个窗口（~12.5s）缩短到 ~2 个（~5s）。 */
+        const val DEFAULT_STEP_UP = 32
 
         /** 单次下调步长（条），降比升快——掉帧的代价高于少看几条弹幕。 */
         const val DEFAULT_STEP_DOWN = 32

@@ -294,6 +294,15 @@ internal class DanmakuEngine(
         // 锐利文字边缘（边缘被混合稀释 → 颜色发浅/不饱满）。弹幕 bitmap 按整数像素 1:1 绘制，无需滤波。
     }
 
+    // 缓存未命中时的受控兜底绘制（主线程 drawText，blbl 同款，见 docs §7.2 P0）。
+    // 仅在 miss 数 ≤ FALLBACK_TEXT_DRAW_LIMIT 时启用，避免 TV 上主线程 drawText 洪峰。
+    private val fallbackFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.DEFAULT_BOLD }
+    private val fallbackStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = Typeface.DEFAULT_BOLD
+        style = Paint.Style.STROKE
+    }
+    private val fallbackFontMetrics = Paint.FontMetrics()
+
     override fun updateViewport(width: Int, height: Int, topInsetPx: Int, bottomInsetPx: Int) {
         viewportWidth = width.coerceAtLeast(0)
         viewportHeight = height.coerceAtLeast(0)
@@ -669,6 +678,8 @@ internal class DanmakuEngine(
 
         var cachedDrawn = 0
         var cacheMissSkipped = 0
+        // 受控兜底绘制计数：本帧 miss 超过阈值后不再 drawText（洪峰保护）。
+        var fallbackDrawn = 0
         // 缓存缺失分类统计：定位"半路消失"到底是无缓存、bitmap 被回收还是样式代际不匹配。
         var missNoEntry = 0
         var missRecycled = 0
@@ -697,9 +708,15 @@ internal class DanmakuEngine(
                 cachedDrawn++
                 continue
             }
-            // 性能优先模式不在主线程直接绘制文字。缓存未完成时跳过本帧，
-            // Action 线程会继续提高可见条目的缓存优先级。
+            // 缓存未命中：已开始运动的条目走受控兜底绘制（drawText），消除"滚到一半消失"；
+            // 未开始运动的条目（等缓存中）仍跳过——它们入场时 startTimeMs 会被重锚到右边缘，
+            // 提前画出来反而会在缓存就绪时"退回右边缘"造成视觉跳变（docs §7.2 P0）。
+            // 洪峰保护：单帧兜底超过 FALLBACK_TEXT_DRAW_LIMIT 后继续跳过，TV 上主线程 drawText 成本高。
             cacheMissSkipped++
+            if (item.motionStarted && fallbackDrawn < FALLBACK_TEXT_DRAW_LIMIT) {
+                drawTextFallback(canvas, item, x, yTop, opacityAlpha)
+                fallbackDrawn++
+            }
             when {
                 entry == null && !item.motionStarted -> missMotionWait++
                 entry == null -> missNoEntry++
@@ -737,6 +754,42 @@ internal class DanmakuEngine(
                 drawMissLogGenMismatch = 0
             }
         }
+    }
+
+    /**
+     * 缓存未命中兜底绘制（主线程 drawText）。blbl 参考实现（L1195-1265）的简化版，
+     * 剥掉了表情 / 高赞图标分支（MyTVB 不支持）。正常路径仍以 bitmap 为主，
+     * 本函数只在 miss 未超限时调用，用于消除"弹幕滚到一半消失 / 晚出现"（docs §7.2 P0）。
+     */
+    private fun drawTextFallback(
+        canvas: Canvas,
+        item: DanmakuItem,
+        x: Float,
+        yTop: Float,
+        opacityAlpha: Int,
+    ) {
+        val text = item.data.text
+        if (text.isBlank()) return
+        if (fallbackFill.textSize != textSizePx) {
+            fallbackFill.textSize = textSizePx
+            fallbackStroke.textSize = textSizePx
+        }
+        if (fallbackStroke.strokeWidth != strokeWidthPx) {
+            fallbackStroke.strokeWidth = strokeWidthPx
+        }
+        fallbackFill.getFontMetrics(fallbackFontMetrics)
+        val outlinePad = outlinePadPx
+        val textX = x + outlinePad
+        val baseline = yTop + outlinePad - fallbackFontMetrics.ascent
+        val rgb = item.data.color and 0xFFFFFF
+        if (strokeWidthPx > 0.01f) {
+            // 描边：黑色，透明度略低于正文（对齐 blbl 参考实现 drawTextDirect）
+            val strokeAlpha = ((opacityAlpha * 0xCC) / 255).coerceIn(0, 255)
+            fallbackStroke.color = (strokeAlpha shl 24) or 0x000000
+            canvas.drawText(text, textX, baseline, fallbackStroke)
+        }
+        fallbackFill.color = (opacityAlpha shl 24) or rgb
+        canvas.drawText(text, textX, baseline, fallbackFill)
     }
 
     override fun setDanmakus(list: List<Danmaku>) {
@@ -1076,12 +1129,26 @@ internal class DanmakuEngine(
     }
 
     private fun writableSnapshot(): RenderSnapshot {
+        var spins = 0
         while (true) {
             val published = latestSnapshot
             for (candidate in snapshots) {
                 if (candidate !== published && candidate.tryBeginWrite()) return candidate
             }
-            Thread.yield()
+            // 主线程持有读租约过久（慢 TV/掉帧）时，纯 yield 会让 action 线程空转烧 CPU，
+            // 反而加剧掉帧（docs §7.2 P1）。超过自旋上限后改为短睡退避。
+            if (++spins > SNAPSHOT_WRITE_SPIN_LIMIT) {
+                try {
+                    Thread.sleep(SNAPSHOT_WRITE_BACKOFF_MS)
+                } catch (_: InterruptedException) {
+                    // 线程被中断（release 路径）：恢复中断位，回退为 yield 自旋，
+                    // 等待快照可写或线程自然退出，不 sleep（避免中断后 sleep 反复抛异常）。
+                    Thread.currentThread().interrupt()
+                    spins = 0
+                }
+            } else {
+                Thread.yield()
+            }
         }
     }
 
@@ -1916,8 +1983,11 @@ internal class DanmakuEngine(
         pxNew: Float,
         marginPx: Float,
     ): Boolean {
-        // 尚未有可绘制缓存的前一条弹幕仍占用轨道；它开始运动前不能在后面塞新弹幕。
-        if (!front.motionStarted) return false
+        // 尚未有可绘制缓存的前一条弹幕仍占用轨道；但等缓存超过 CACHE_BLOCK_LANE_TIMEOUT_MS
+        // 仍不放行会堵死整条轨道（docs §7.2 P1），超时后允许后车跟入。
+        if (!front.motionStarted) {
+            if (nowMs - front.startTimeMs < CACHE_BLOCK_LANE_TIMEOUT_MS) return false
+        }
         val elapsedPrev = nowMs - front.startTimeMs
         val prevRemaining = front.durationMs - elapsedPrev
         if (prevRemaining <= 0) return true
@@ -2115,17 +2185,28 @@ internal class DanmakuEngine(
         private const val MAX_CACHE_QUEUE_DEPTH = 48
         private const val MAX_CACHE_WAIT_MS = 1_600
 
+        /** 缓存未命中兜底绘制（主线程 drawText）的单帧上限：超过即跳过，防止 TV 上绘制洪峰。 */
+        private const val FALLBACK_TEXT_DRAW_LIMIT = 8
+
+        /** 无图前车堵轨道的放行等待时间：等缓存超过该时长后允许后车跟入（docs §7.2 P1）。 */
+        private const val CACHE_BLOCK_LANE_TIMEOUT_MS = 300
+
+        /** writableSnapshot 自旋上限：超过后从 yield 转为短睡，避免 action 线程空转烧 CPU。 */
+        private const val SNAPSHOT_WRITE_SPIN_LIMIT = 200
+        private const val SNAPSHOT_WRITE_BACKOFF_MS = 1L
+
         /** 建图失败（预算耗尽）后的重试退避：给释放路径时间回填位图池。 */
         private const val CACHE_FAIL_RETRY_BACKOFF_MS = 250
 
         /**
          * 同屏弹幕数上限自适应档：种子值（自适应会按帧率在 [ADAPTIVE_FLOOR]～
          * [ADAPTIVE_CEILING] 间自动增减，见 AdaptiveOnScreenLimit）。
+         * 相比旧值（TV 100 / 其他 160）上调，缓解"弹幕变稀"的体感（docs §7.2 P0）。
          */
-        private const val DEFAULT_TV_MAX_ON_SCREEN = 100
-        private const val DEFAULT_MAX_ON_SCREEN = 160
+        private const val DEFAULT_TV_MAX_ON_SCREEN = 140
+        private const val DEFAULT_MAX_ON_SCREEN = 200
 
-        /** 自适应同屏上限的下限/硬顶。 */
+        /** 自适应同屏上限的下限/硬顶。下限保留 100 作为弱机掉帧时的安全阀。 */
         private const val ADAPTIVE_FLOOR = 100
         private const val ADAPTIVE_CEILING = 400
 
