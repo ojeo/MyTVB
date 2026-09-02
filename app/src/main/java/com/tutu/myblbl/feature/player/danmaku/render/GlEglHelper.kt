@@ -5,6 +5,7 @@ import android.opengl.EGLConfig
 import android.opengl.EGLContext
 import android.opengl.EGLDisplay
 import android.opengl.EGLSurface
+import android.opengl.EGLExt
 import android.view.Surface
 
 /**
@@ -31,6 +32,11 @@ internal class GlEglHelper {
         if (!initContext()) return false
         if (!createWindowSurface(surface)) return false
         if (!makeCurrent()) return false
+        // Choreographer already paces this producer to display vsync. Waiting for another EGL
+        // swap interval can turn one slightly late frame into a 33ms cadence on double-buffered
+        // TV/emulator surfaces. Interval 0 keeps swap non-vsync-blocking while Choreographer
+        // remains the single frame-rate limiter.
+        EGL14.eglSwapInterval(display, 0)
         return true
     }
 
@@ -73,6 +79,12 @@ internal class GlEglHelper {
         EGL14.eglMakeCurrent(display, surface, surface, context)
 
     fun swapBuffers(): Boolean = EGL14.eglSwapBuffers(display, surface)
+
+    fun setPresentationTime(frameTimeNanos: Long) {
+        if (isReady()) {
+            EGLExt.eglPresentationTimeANDROID(display, surface, frameTimeNanos)
+        }
+    }
 
     fun release() {
         if (display == EGL14.EGL_NO_DISPLAY) return

@@ -32,7 +32,8 @@ internal class AtlasSlot(
  * - 所有方法只能在 RenderThread（持有 GL context）调用。
  */
 internal class GlTextureAtlas(
-    private val pageSize: Int = ATLAS_PAGE_SIZE,
+    private val pageWidth: Int = ATLAS_PAGE_WIDTH,
+    private val pageHeight: Int = ATLAS_PAGE_HEIGHT,
     private val maxPages: Int = ATLAS_MAX_PAGES,
     private val uploadBudgetBytesPerFrame: Long = ATLAS_UPLOAD_BUDGET_BYTES,
 ) {
@@ -60,6 +61,8 @@ internal class GlTextureAtlas(
         if (entry.isRecycled) return null
         val bmp = entry.bitmap
         if (bmp.isRecycled || bmp.width <= 0 || bmp.height <= 0) return null
+        // Do not eagerly instantiate every page for an item that can never fit.
+        if (bmp.width > pageWidth || bmp.height > pageHeight) return null
         val bytes = bmp.allocationByteCount.toLong().coerceAtLeast(0L)
         if (frameUploadBytes + bytes > uploadBudgetBytesPerFrame) return null
 
@@ -75,10 +78,10 @@ internal class GlTextureAtlas(
             pageId = page.id,
             width = bmp.width,
             height = bmp.height,
-            u0 = alloc.left.toFloat() / pageSize,
-            v0 = alloc.top.toFloat() / pageSize,
-            u1 = (alloc.left + bmp.width).toFloat() / pageSize,
-            v1 = (alloc.top + bmp.height).toFloat() / pageSize,
+            u0 = alloc.left.toFloat() / pageWidth,
+            v0 = alloc.top.toFloat() / pageHeight,
+            u1 = (alloc.left + bmp.width).toFloat() / pageWidth,
+            v1 = (alloc.top + bmp.height).toFloat() / pageHeight,
         )
         entryToSlot[entry] = slot
         page.lastTouchedFrame = frameIndex
@@ -131,7 +134,7 @@ internal class GlTextureAtlas(
     private fun ensurePage(index: Int): AtlasPage? {
         var page = pages[index]
         if (page == null) {
-            val created = AtlasPage(index, pageSize)
+            val created = AtlasPage(index, pageWidth, pageHeight)
             if (!created.init()) return null
             pages[index] = created
             page = created
@@ -177,7 +180,7 @@ internal class GlTextureAtlas(
      * 单页 Atlas：shelf（行）分配器 + 一个 GL 纹理。
      * [id] 固定为槽位索引；页被淘汰时仅重置 shelf 状态（纹理内存复用）。
      */
-    private class AtlasPage(val id: Int, val size: Int) {
+    private class AtlasPage(val id: Int, val width: Int, val height: Int) {
         var textureId = 0
         var lastTouchedFrame = 0L
         private val shelves = ArrayList<Shelf>(16)
@@ -191,7 +194,7 @@ internal class GlTextureAtlas(
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, textureId)
             GLES30.glTexImage2D(
                 GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA,
-                size, size, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null,
+                width, height, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null,
             )
             GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
             GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
@@ -200,13 +203,21 @@ internal class GlTextureAtlas(
             return true
         }
 
-        fun hasRoom(w: Int, h: Int): Boolean =
-            w in 1..size && h in 1..size && (findShelfRoom(w, h) != null || size - usedHeight >= h)
+        fun hasRoom(w: Int, h: Int): Boolean {
+            if (w !in 1..width || h !in 1..height) return false
+            // hasRoom must be a pure probe. Calling findShelfRoom here used to advance usedX,
+            // then alloc() advanced it a second time, wasting half of every shelf and eventually
+            // making UVs point at regions that were never uploaded.
+            for (s in shelves) {
+                if (s.height >= h && width - s.usedX >= w) return true
+            }
+            return height - usedHeight >= h
+        }
 
         fun alloc(w: Int, h: Int): Rect? {
-            if (w <= 0 || h <= 0 || w > size || h > size) return null
+            if (w <= 0 || h <= 0 || w > width || h > height) return null
             findShelfRoom(w, h)?.let { return it }
-            if (size - usedHeight < h) return null
+            if (height - usedHeight < h) return null
             val y = usedHeight
             shelves.add(Shelf(y, h, w))
             usedHeight += h
@@ -215,7 +226,7 @@ internal class GlTextureAtlas(
 
         private fun findShelfRoom(w: Int, h: Int): Rect? {
             for (s in shelves) {
-                if (s.height >= h && size - s.usedX >= w) {
+                if (s.height >= h && width - s.usedX >= w) {
                     val x = s.usedX
                     s.usedX += w
                     return Rect(x, s.y, w, h)
@@ -231,7 +242,7 @@ internal class GlTextureAtlas(
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, textureId)
             GLES30.glTexImage2D(
                 GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA,
-                size, size, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null,
+                width, height, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null,
             )
         }
 
@@ -246,7 +257,10 @@ internal class GlTextureAtlas(
     }
 
     companion object {
-        const val ATLAS_PAGE_SIZE = 1024
+        // Danmaku textures are wide and shallow. Square 1024 pages reject ordinary long lines
+        // and waste most memory vertically; 2048x512 keeps the same 4MB/page footprint.
+        const val ATLAS_PAGE_WIDTH = 2048
+        const val ATLAS_PAGE_HEIGHT = 512
         const val ATLAS_MAX_PAGES = 6
         private const val ATLAS_UPLOAD_BUDGET_BYTES = 1_048_576L
     }

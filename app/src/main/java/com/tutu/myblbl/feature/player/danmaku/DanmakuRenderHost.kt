@@ -12,6 +12,11 @@ interface DanmakuRenderHost {
     /** 实际 View，用于 visibility / invalidate / 布局等 View 层操作。 */
     val renderView: View
 
+    /** 应用弹幕开关对应的 View 可见性；GPU 后端可额外叠加视频首帧门禁。 */
+    fun setRenderVisible(visible: Boolean) {
+        renderView.visibility = if (visible) View.VISIBLE else View.GONE
+    }
+
     fun setPositionProvider(provider: () -> Long)
 
     fun setIsPlayingProvider(provider: () -> Boolean)

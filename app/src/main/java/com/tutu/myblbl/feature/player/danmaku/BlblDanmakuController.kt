@@ -17,6 +17,7 @@ import com.tutu.myblbl.feature.player.danmaku.common.VipDanmakuTextureCache
 import com.tutu.myblbl.feature.player.danmaku.common.nextDanmakuPreparationGeneration
 import com.tutu.myblbl.model.dm.DmModel
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -134,6 +135,10 @@ class BlblDanmakuController(
     private var renderingStopped: Boolean = false
     @Volatile
     private var resumeDataRequested: Boolean = false
+    /**
+     * 恢复请求序号。旧协程的 finally 只能释放自己的闩锁，不能覆盖 stop 后的新一次恢复。
+     */
+    private var resumeRequestSerial: Long = 0L
 
     init {
         installProviders()
@@ -148,6 +153,23 @@ class BlblDanmakuController(
         // 此前固定 1f：倍速播放时平滑时钟必然落后视频位置，只能靠漂移监督器反复纠正。
         view.setPlaybackSpeedProvider { currentPlaybackSpeed }
         view.setConfigProvider { currentConfig }
+    }
+
+    /** Rebind providers and replay retained data after the render backend is replaced. */
+    fun onRenderHostChanged() {
+        val view = viewProvider() ?: return
+        installProviders()
+        view.setRenderVisible(currentConfig.enabled)
+        val positionMs = playerPositionProvider?.invoke()?.coerceAtLeast(0L) ?: 0L
+        view.notifySeek(positionMs)
+        if (rawItems.isEmpty()) {
+            view.setDanmakus(emptyList())
+        } else if (renderingStopped || dataStopped) {
+            if (isPlaying || playWhenReady) requestDataResume()
+        } else {
+            rebuildDataForSettings()
+        }
+        view.renderView.invalidate()
     }
 
     override fun setData(
@@ -175,11 +197,13 @@ class BlblDanmakuController(
                         renderingStopped = renderingStopped,
                         restoreStoppedRendering = true,
                         resumeDataRequested = resumeDataRequested
-                    ) && renderingStopped
+                ) && renderingStopped
                 ) {
-                    injectToView(prepared, append = false)
-                    renderingStopped = false
-                    resumeDataRequested = false
+                    if (injectToView(prepared, append = false)) {
+                        renderingStopped = false
+                    } else {
+                        dataStopped = sorted.isNotEmpty()
+                    }
                 } else if (renderingStopped) {
                     dataStopped = sorted.isNotEmpty()
                 } else {
@@ -258,7 +282,7 @@ class BlblDanmakuController(
         livePaused = false
         renderingStopped = false
         dataStopped = false
-        resumeDataRequested = false
+        invalidateResumeRequest()
         viewProvider()?.setDanmakus(emptyList())
         viewProvider()?.renderView?.invalidate()
     }
@@ -287,8 +311,7 @@ class BlblDanmakuController(
         val old = lastSnapshot
         lastSnapshot = snapshot
         currentConfig = buildConfig(snapshot)
-        viewProvider()?.renderView?.visibility =
-            if (snapshot.enabled) android.view.View.VISIBLE else android.view.View.GONE
+        viewProvider()?.setRenderVisible(snapshot.enabled)
         if (liveMode) {
             if (!snapshot.enabled) {
                 clearLiveQueues()
@@ -343,6 +366,7 @@ class BlblDanmakuController(
         if (!wasPlaying && playWhenReady) {
             viewProvider()?.renderView?.invalidate()
         }
+        if (playWhenReady && dataStopped && rawItems.isNotEmpty()) requestDataResume()
         if (playWhenReady) startDriftSync()
     }
 
@@ -353,6 +377,7 @@ class BlblDanmakuController(
         if (!wasPlaying && playing) {
             viewProvider()?.renderView?.invalidate()
         }
+        if (playing && dataStopped && rawItems.isNotEmpty()) requestDataResume()
     }
 
     @Suppress("UNUSED_PARAMETER")
@@ -408,7 +433,7 @@ class BlblDanmakuController(
         playWhenReady = false
         isPlaying = false
         renderingStopped = true
-        resumeDataRequested = false
+        invalidateResumeRequest()
         stopDriftSync()
         // 仅清引擎 active 数据，保留 rawItems：切后台 stop 后，切回前台播放时
         // notifyIsPlayingChanged/notifyPlaybackFirstFrame 会用 rawItems 重新喂数据恢复弹幕。
@@ -427,7 +452,7 @@ class BlblDanmakuController(
         stop()
         renderingStopped = false
         dataStopped = false
-        resumeDataRequested = false
+        invalidateResumeRequest()
         viewProvider()?.notifySeek(positionMs.coerceAtLeast(0L))
     }
 
@@ -600,21 +625,44 @@ class BlblDanmakuController(
      * 对齐 ak 引擎：ak 的 stop 不碰 danmakuTimeline，恢复时靠 rebuildAndApplyData 重建窗口；
      * lite 的 stop 此前会清 rawItems 导致切回后弹幕永久消失，现改为保留 rawItems 并在此恢复。
      */
-    private fun resumeDataFromBackground() {
-        if (rawItems.isEmpty()) return
+    private fun resumeDataFromBackground(requestSerial: Long) {
         val previousJob = prepareJob
         val generation = nextDanmakuPreparationGeneration(prepareGeneration.get(), replace = false)
         prepareJob = controllerScope.launch {
-            previousJob?.join()
-            if (prepareGeneration.get() != generation) return@launch
-            applyDataToViewAsync(generation, append = false, restoreStoppedRendering = true)
+            try {
+                previousJob?.join()
+                if (prepareGeneration.get() != generation) {
+                    AppLog.i(TAG, "resume dropped: stale generation=$generation current=${prepareGeneration.get()}")
+                    return@launch
+                }
+                applyDataToViewAsync(generation, append = false, restoreStoppedRendering = true)
+            } finally {
+                // Cancellation and generation replacement must also release the latch. Otherwise
+                // every later first-frame/resume callback is ignored for the rest of playback.
+                withContext(NonCancellable + Dispatchers.Main.immediate) {
+                    if (resumeRequestSerial == requestSerial) {
+                        resumeDataRequested = false
+                        AppLog.i(
+                            TAG,
+                            "resume finished serial=$requestSerial stopped=$dataStopped host=${viewProvider() != null}",
+                        )
+                    }
+                }
+            }
         }
     }
 
     private fun requestDataResume() {
-        if (resumeDataRequested) return
+        if (resumeDataRequested || rawItems.isEmpty()) return
         resumeDataRequested = true
-        resumeDataFromBackground()
+        val requestSerial = ++resumeRequestSerial
+        AppLog.i(TAG, "resume requested serial=$requestSerial items=${rawItems.size}")
+        resumeDataFromBackground(requestSerial)
+    }
+
+    private fun invalidateResumeRequest() {
+        resumeRequestSerial++
+        resumeDataRequested = false
     }
 
     private fun rebuildDataForSettings() {
@@ -665,10 +713,12 @@ class BlblDanmakuController(
             )
             if (restoreStoppedRendering) {
                 if (!canInject) return@withContext
-                injectToView(prepared, append = false)
-                appliedFilterContext = taskFilterContext
-                renderingStopped = false
-                resumeDataRequested = false
+                if (injectToView(prepared, append = false)) {
+                    appliedFilterContext = taskFilterContext
+                    renderingStopped = false
+                } else {
+                    dataStopped = snapshotItems.isNotEmpty()
+                }
             } else if (!canInject) {
                 dataStopped = snapshotItems.isNotEmpty()
             } else {
@@ -738,8 +788,8 @@ class BlblDanmakuController(
     }
 
     /** 把预处理结果注入引擎（操作 View，必须在主线程调用）。 */
-    private fun injectToView(danmakus: List<Danmaku>, append: Boolean) {
-        val view = viewProvider() ?: return
+    private fun injectToView(danmakus: List<Danmaku>, append: Boolean): Boolean {
+        val view = viewProvider() ?: return false
         if (append) {
             view.appendDanmakus(danmakus, alreadySorted = true)
         } else {
@@ -751,6 +801,7 @@ class BlblDanmakuController(
             TAG,
             "applied danmakus=${danmakus.size} merge=${lastSnapshot?.mergeDuplicate ?: true} append=$append"
         )
+        return true
     }
 
     /**

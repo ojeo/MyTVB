@@ -2784,7 +2784,7 @@ class MyPlayerView @JvmOverloads constructor(
      * 创建弹幕引擎（GPU 优先，EGL 失败自动降级 Canvas）。需在 setData 之前、播放器 setup 时调用，
      * 保证引擎收到播放起始位置/首帧等早期通知；幂等，可安全重复调用。
      * 引擎作为蒙版宿主的子层；GPU 引擎为独立 Surface（位于视频之上、UI 层之下），
-     * 防挡蒙版（View 层 clipPath）对其不生效，V1 不做 GPU 蒙版裁剪。
+     * 防挡蒙版（View 层 clipPath）对独立 Surface 不生效，GPU 后端改用共享 path 纹理裁剪。
      */
     fun setupDanmakuEngine() {
         if (liteDanmakuController != null) return
@@ -2792,7 +2792,8 @@ class MyPlayerView @JvmOverloads constructor(
             when (resolveDanmakuRenderMode()) {
                 DanmakuRenderMode.GL ->
                     GlDanmakuView(context).also {
-                        it.onEglFailed = { glDanmakuFailed = true }
+                        val glView = it
+                        it.onEglFailed = { post { fallbackToCanvasDanmaku(glView) } }
                         // GPU 弹幕引擎的防挡蒙版：消费 maskHost 发布的 path 快照。
                         it.maskHostProvider = { dmkMaskHost }
                         // Debug Overlay 的视频 FPS：来自播放器 VideoFrameMetadataListener 统计。
@@ -2809,7 +2810,34 @@ class MyPlayerView @JvmOverloads constructor(
         liteDanmakuController = BlblDanmakuController(context) { liteDanmakuView }.also {
             it.playerPositionProvider = { playerPositionMs }
         }
+        // 必须在首轮 measure / Surface buffer 分配前把真实 area 等配置交给 GPU 视图。
+        // 否则默认配置与用户配置不同会在启动后立刻改 fixed buffer 尺寸，部分设备会
+        // 拒收旧尺寸缓冲并留下透明空层。
+        syncDanmakuSettings()
         restoreOverlayZOrder()
+    }
+
+    private fun fallbackToCanvasDanmaku(failedView: GlDanmakuView) {
+        if (liteDanmakuView !== failedView) return
+        glDanmakuFailed = true
+        val failedRenderView = failedView.renderView
+        val parent = failedRenderView.parent as? ViewGroup
+        val childIndex = parent?.indexOfChild(failedRenderView) ?: -1
+        parent?.removeView(failedRenderView)
+
+        val fallback = DanmakuView(context)
+        fallback.layoutParams = FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
+        fallback.isClickable = false
+        fallback.isFocusable = false
+        if (parent != null) {
+            parent.addView(fallback, childIndex.coerceAtLeast(0))
+        } else {
+            dmkMaskHost?.addView(fallback) ?: addView(fallback)
+        }
+        liteDanmakuView = fallback
+        liteDanmakuController?.onRenderHostChanged()
+        restoreOverlayZOrder()
+        AppLog.w("GlDmView", "GPU danmaku backend failed; Canvas backend restored")
     }
 
     fun setDanmakuData(
@@ -2818,8 +2846,8 @@ class MyPlayerView @JvmOverloads constructor(
         startupTraceId: String = PlaybackStartupTrace.NO_TRACE,
         startupTraceStartElapsedMs: Long = 0L
     ) {
-        syncDanmakuSettings()
         setupDanmakuEngine()
+        syncDanmakuSettings()
         activeDanmakuController()?.setData(data, filterContext, startupTraceId, startupTraceStartElapsedMs)
     }
 
@@ -2831,8 +2859,8 @@ class MyPlayerView @JvmOverloads constructor(
     }
 
     fun startLiveDanmaku() {
-        syncDanmakuSettings()
         setupDanmakuEngine()
+        syncDanmakuSettings()
         activeLiveDanmakuController()?.startLive()
     }
 

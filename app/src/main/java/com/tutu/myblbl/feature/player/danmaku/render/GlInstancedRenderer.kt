@@ -63,12 +63,13 @@ internal class GlInstancedRenderer {
             // 精度必须与顶点 shader 的 uViewport（highp）一致，否则 glLinkProgram 报
             // "Precisions for uniform uViewport do not match"。
             uniform highp vec2 uViewport;
+            uniform highp vec2 uSurfaceSize;
             in vec2 vUv;
             in vec4 vColor;
             out vec4 fragColor;
             void main() {
                 if (uMaskEnabled != 0) {
-                    vec2 maskUv = vec2(gl_FragCoord.x / uViewport.x, 1.0 - gl_FragCoord.y / uViewport.y);
+                    vec2 maskUv = vec2(gl_FragCoord.x / uSurfaceSize.x, 1.0 - gl_FragCoord.y / uSurfaceSize.y);
                     float maskValue = texture(uMask, maskUv).a;
                     if (maskValue < 0.5) discard;
                 }
@@ -83,28 +84,41 @@ internal class GlInstancedRenderer {
     private var quadVbo = 0
     private var instanceVbo = 0
     private var viewportUniform = 0
+    private var surfaceSizeUniform = 0
     private var textureUniform = 0
     private var maskUniform = 0
     private var maskEnabledUniform = 0
-    private var viewportW = 1
-    private var viewportH = 1
+    private var surfaceW = 1
+    private var surfaceH = 1
+    private var logicalViewportW = 1
+    private var logicalViewportH = 1
     private var maskTextureId = 0
     private var maskEnabled = false
 
-    private val instanceBuffer: FloatBuffer =
-        ByteBuffer.allocateDirect(MAX_INSTANCES * STRIDE_BYTES).order(ByteOrder.nativeOrder()).asFloatBuffer()
+    // Instances must stay grouped by atlas page. A single snapshot-ordered buffer cannot be
+    // sliced using pageCounts because items from different pages can be interleaved.
+    private val pageInstanceBuffers: Array<FloatBuffer> =
+        Array(MAX_PAGES) {
+            ByteBuffer.allocateDirect(MAX_INSTANCES * STRIDE_BYTES)
+                .order(ByteOrder.nativeOrder())
+                .asFloatBuffer()
+        }
     private val pageCounts = IntArray(MAX_PAGES)
-    private val pageOffsets = IntArray(MAX_PAGES)
 
     /** 上一帧实际绘制的弹幕实例数（性能采样用）。 */
     @Volatile
     var lastDrawnInstanceCount: Int = 0
         private set
 
+    @Volatile
+    var lastDrawCallCount: Int = 0
+        private set
+
     fun init() {
         val p = GlProgram(VERTEX_SHADER, FRAGMENT_SHADER)
         program = p
         viewportUniform = p.uniformLocation("uViewport")
+        surfaceSizeUniform = p.uniformLocation("uSurfaceSize")
         textureUniform = p.uniformLocation("uTexture")
         maskUniform = p.uniformLocation("uMask")
         maskEnabledUniform = p.uniformLocation("uMaskEnabled")
@@ -157,14 +171,16 @@ internal class GlInstancedRenderer {
         GLES30.glDisable(GLES30.GL_CULL_FACE)
     }
 
-    fun setViewport(width: Int, height: Int) {
-        viewportW = width.coerceAtLeast(1)
-        viewportH = height.coerceAtLeast(1)
+    fun setViewport(surfaceWidth: Int, surfaceHeight: Int, logicalWidth: Int = surfaceWidth, logicalHeight: Int = surfaceHeight) {
+        surfaceW = surfaceWidth.coerceAtLeast(1)
+        surfaceH = surfaceHeight.coerceAtLeast(1)
+        logicalViewportW = logicalWidth.coerceAtLeast(1)
+        logicalViewportH = logicalHeight.coerceAtLeast(1)
     }
 
     /** 清屏（透明背景），供每帧开头调用。 */
     fun beginFrame() {
-        GLES30.glViewport(0, 0, viewportW, viewportH)
+        GLES30.glViewport(0, 0, surfaceW, surfaceH)
         GLES30.glClearColor(0f, 0f, 0f, 0f)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
     }
@@ -188,9 +204,12 @@ internal class GlInstancedRenderer {
         v1: Float,
         alpha: Float,
     ) {
-        instanceBuffer.put(x).put(y).put(w).put(h)
-        instanceBuffer.put(u0).put(v0).put(u1).put(v1)
-        instanceBuffer.put(1f).put(1f).put(1f).put(alpha)
+        if (pageId !in 0 until MAX_PAGES) return
+        val pageBuffer = pageInstanceBuffers[pageId]
+        if (pageBuffer.remaining() < STRIDE_FLOATS) return
+        pageBuffer.put(x).put(y).put(w).put(h)
+        pageBuffer.put(u0).put(v0).put(u1).put(v1)
+        pageBuffer.put(1f).put(1f).put(1f).put(alpha)
         pageCounts[pageId]++
     }
 
@@ -200,30 +219,20 @@ internal class GlInstancedRenderer {
      */
     fun drawPages(textureIds: IntArray) {
         val p = program
-        val total = instanceBuffer.position()
-        if (p == null || total <= 0) {
+        var totalInstances = 0
+        for (count in pageCounts) totalInstances += count
+        if (p == null || totalInstances <= 0) {
             lastDrawnInstanceCount = 0
-            // 无实例/未初始化：必须清空页计数，否则残留计数会把下一帧实例段错位。
-            java.util.Arrays.fill(pageCounts, 0)
-            if (p == null) return
+            lastDrawCallCount = 0
+            clearInstanceBuffers()
             return
         }
-        lastDrawnInstanceCount = total / STRIDE_FLOATS
-
-        // 计算每页实例段起始偏移（前缀和）。
-        var offset = 0
-        for (i in textureIds.indices) {
-            pageOffsets[i] = offset
-            offset += pageCounts[i]
-        }
-
-        instanceBuffer.flip()
-        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, instanceVbo)
-        GLES30.glBufferSubData(GLES30.GL_ARRAY_BUFFER, 0, instanceBuffer.remaining() * 4, instanceBuffer)
-        instanceBuffer.clear()
+        lastDrawnInstanceCount = totalInstances
+        lastDrawCallCount = 0
 
         p.use()
-        GLES30.glUniform2f(viewportUniform, viewportW.toFloat(), viewportH.toFloat())
+        GLES30.glUniform2f(viewportUniform, logicalViewportW.toFloat(), logicalViewportH.toFloat())
+        GLES30.glUniform2f(surfaceSizeUniform, surfaceW.toFloat(), surfaceH.toFloat())
         GLES30.glUniform1i(textureUniform, 0)
         GLES30.glUniform1i(maskUniform, 1)
         GLES30.glUniform1i(maskEnabledUniform, if (maskEnabled && maskTextureId != 0) 1 else 0)
@@ -241,15 +250,23 @@ internal class GlInstancedRenderer {
             if (count <= 0) continue
             val texId = textureIds[i]
             if (texId == 0) continue
+            val pageBuffer = pageInstanceBuffers[i]
+            pageBuffer.flip()
+            GLES30.glBufferSubData(GLES30.GL_ARRAY_BUFFER, 0, pageBuffer.remaining() * 4, pageBuffer)
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, texId)
-            val byteOffset = pageOffsets[i] * STRIDE_BYTES
-            GLES30.glVertexAttribPointer(LOC_RECT, 4, GLES30.GL_FLOAT, false, STRIDE_BYTES, byteOffset)
-            GLES30.glVertexAttribPointer(LOC_UV, 4, GLES30.GL_FLOAT, false, STRIDE_BYTES, byteOffset + 16)
-            GLES30.glVertexAttribPointer(LOC_COLOR, 4, GLES30.GL_FLOAT, false, STRIDE_BYTES, byteOffset + 32)
+            GLES30.glVertexAttribPointer(LOC_RECT, 4, GLES30.GL_FLOAT, false, STRIDE_BYTES, 0)
+            GLES30.glVertexAttribPointer(LOC_UV, 4, GLES30.GL_FLOAT, false, STRIDE_BYTES, 16)
+            GLES30.glVertexAttribPointer(LOC_COLOR, 4, GLES30.GL_FLOAT, false, STRIDE_BYTES, 32)
             GLES30.glDrawArraysInstanced(GLES30.GL_TRIANGLE_STRIP, 0, 4, count)
+            lastDrawCallCount++
         }
         GLES30.glBindVertexArray(0)
         GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0)
+        clearInstanceBuffers()
+    }
+
+    private fun clearInstanceBuffers() {
+        for (buffer in pageInstanceBuffers) buffer.clear()
         java.util.Arrays.fill(pageCounts, 0)
     }
 

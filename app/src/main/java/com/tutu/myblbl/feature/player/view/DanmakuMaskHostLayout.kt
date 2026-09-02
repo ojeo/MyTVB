@@ -62,6 +62,8 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
     private val surfaceMaskLock = Any()
     private val surfaceMaskPath = Path().apply { fillType = Path.FillType.WINDING }
     @Volatile private var surfaceMaskActive = false
+    private var mergedPathGeneration = 0
+    private var publishedPathGeneration = -1
     /** 自增版本号：GPU 弹幕引擎据此检测 mask 变化（@Volatile 跨线程可见）。 */
     @Volatile var surfaceMaskVersion = 0
         private set
@@ -99,6 +101,7 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
         cachedFrame = null
         mergedPath.reset()
         mergedPath.fillType = Path.FillType.WINDING
+        mergedPathGeneration++
         publishSurfaceMask(enabled = false)
         postInvalidateOnAnimation()
     }
@@ -162,6 +165,7 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
             cachedFrame = null
             mergedPath.reset()
             mergedPath.fillType = Path.FillType.WINDING
+            mergedPathGeneration++
             maybeLogMaskState("empty_paths", pts, frame, bounds, false)
             drawDanmakuWithoutMask(canvas)
             recordMaskPerf("empty_paths", drawStartedAtMs, pts, frame, bounds, false, false, false, 0L)
@@ -233,10 +237,17 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
      */
     private fun publishSurfaceMask(enabled: Boolean) {
         synchronized(surfaceMaskLock) {
-            surfaceMaskActive = enabled && !mergedPath.isEmpty
+            val active = enabled && !mergedPath.isEmpty
+            // dispatchDraw 可达 60fps，但 path 通常只在视频 mask 帧变化时才重建。
+            // 相同状态/相同 path 不发布新版本，避免 GL 线程重复栅格化并上传同一纹理。
+            if (surfaceMaskActive == active && (!active || publishedPathGeneration == mergedPathGeneration)) {
+                return
+            }
+            surfaceMaskActive = active
             surfaceMaskPath.reset()
             surfaceMaskPath.fillType = Path.FillType.WINDING
             if (surfaceMaskActive) surfaceMaskPath.set(mergedPath)
+            publishedPathGeneration = mergedPathGeneration
             surfaceMaskVersion++
         }
     }
@@ -284,6 +295,7 @@ class DanmakuMaskHostLayout @JvmOverloads constructor(
             transformPath.transform(transformMatrix)
             mergedPath.addPath(transformPath)
         }
+        mergedPathGeneration++
     }
 
     private fun maybeLogMaskState(

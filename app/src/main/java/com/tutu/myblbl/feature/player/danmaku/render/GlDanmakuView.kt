@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.opengl.GLES30
 import android.opengl.GLUtils
@@ -22,6 +23,8 @@ import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
+import android.view.View.MeasureSpec
+import com.tutu.myblbl.BuildConfig
 import com.tutu.myblbl.core.common.log.AppLog
 import com.tutu.myblbl.feature.player.danmaku.CacheBuildResult
 import com.tutu.myblbl.feature.player.danmaku.CacheManager
@@ -84,12 +87,17 @@ class GlDanmakuView @JvmOverloads constructor(
 
         /** 渲染性能采样日志间隔（ms）。 */
         private const val PERF_LOG_INTERVAL_MS = 3_000L
+        private const val PROVIDER_SAMPLE_INTERVAL_MS = 100L
+        private const val TARGET_FRAME_NS = 16_666_667L
 
         // ---- Debug Overlay ----
         private const val DIAG_RING_CAPACITY = 600
         private const val DIAG_UPDATE_INTERVAL_MS = 500L
         private const val DIAG_BG_COLOR = 0xCC000000.toInt()
-        private const val DIAG_LINE_COUNT = 7
+        private const val DIAG_LINE_COUNT = 8
+        private const val MASK_SAMPLE_COLUMNS = 18
+        private const val MASK_SAMPLE_ROWS = 10
+        private const val MASK_WARNING_INTERVAL_MS = 3_000L
     }
 
     // ---- providers（由 BlblDanmakuController 注入）----
@@ -98,6 +106,34 @@ class GlDanmakuView @JvmOverloads constructor(
     private var playWhenReadyProvider: (() -> Boolean)? = null
     private var playbackSpeedProvider: (() -> Float)? = null
     private var configProvider: (() -> DanmakuConfig)? = null
+
+    /**
+     * Media3 providers are main-thread confined. The GL thread consumes this immutable sample
+     * and extrapolates position from elapsedRealtime, so a busy UI thread cannot quantize GL
+     * motion to the main window's lower frame rate.
+     */
+    private data class ProviderSnapshot(
+        val positionMs: Long,
+        val sampledAtRealtimeNs: Long,
+        val isPlaying: Boolean,
+        val playWhenReady: Boolean,
+        val speed: Float,
+        val config: DanmakuConfig,
+    )
+
+    @Volatile
+    private var providerSnapshot =
+        ProviderSnapshot(0L, SystemClock.elapsedRealtimeNanos(), false, false, 1f, defaultConfig())
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var providerSamplerRunning = false
+    private val providerSampler =
+        object : Runnable {
+            override fun run() {
+                if (!providerSamplerRunning || released || !isAttachedToWindow) return
+                sampleProvidersOnMain()
+                mainHandler.postDelayed(this, PROVIDER_SAMPLE_INTERVAL_MS)
+            }
+        }
 
     // ---- 引擎组件（复用现有成熟模块）----
     private val cacheManager: CacheManager
@@ -120,6 +156,17 @@ class GlDanmakuView @JvmOverloads constructor(
     @Volatile private var eglReady = false
     @Volatile private var surfaceWidth = 0
     @Volatile private var surfaceHeight = 0
+    @Volatile private var logicalViewportWidth = 0
+    @Volatile private var logicalViewportHeight = 0
+    @Volatile private var renderViewportWidth = 0
+    @Volatile private var renderViewportHeight = 0
+    private var fixedBufferWidth = 0
+    private var fixedBufferHeight = 0
+    @Volatile private var surfaceAvailable = false
+    // 两个 SurfaceView 必须保持相同的全屏 View 几何，避免 SurfaceFlinger 在添加/更新
+    // 顶部 band 时短暂裁切视频 Surface。内部 buffer 仍可只保留内容 band 的像素量；
+    // GL 投影使用完整视口，SurfaceFlinger 拉伸后字体与运动坐标仍保持正确比例。
+    private val renderScale = 0.5f
     @Volatile private var released = false
     private var renderLoopRunning = false
     private val frameCallback = FrameCallback()
@@ -138,14 +185,20 @@ class GlDanmakuView @JvmOverloads constructor(
     private var perfMaxFrameNs = 0L
     private var perfFrameCount = 0
     private var perfLastLogUptimeMs = 0L
+    private var perfAccumSwapNs = 0L
+    private var perfMaxSwapNs = 0L
+    @Volatile private var lastSwapMs = 0f
 
     // ---- Debug Overlay（方案 §70；RenderThread 采集 RingBuffer，onDraw 主线程绘制）----
-    @Volatile private var debugOverlayEnabled = false
-    @Volatile private var manualDebugOverlay = false
+    // Debug APKs are validation builds: keep the requested on-screen diagnostics visible even
+    // when persistent file logging is off. Release builds still default to zero-overhead off.
+    @Volatile private var debugOverlayEnabled = BuildConfig.DEBUG
+    @Volatile private var manualDebugOverlay = BuildConfig.DEBUG
     private val frameTimeRingNs = LongArray(DIAG_RING_CAPACITY)
     private var frameTimeRingHead = 0
     private var frameTimeRingCount = 0
-    private var lastDiagFrameCount = 0
+    private var diagnosticFrameTotal = 0L
+    private var lastDiagFrameTotal = 0L
     private var lastDiagUpdateUptimeMs = 0L
     @Volatile private var diagSnapshot: GlDiagnosticSnapshot? = null
     private val diagBgPaint = Paint().apply { color = DIAG_BG_COLOR }
@@ -160,6 +213,23 @@ class GlDanmakuView @JvmOverloads constructor(
     @Volatile private var uiFps = 0f
     private var uiFrameCount = 0L
     private var uiFrameWindowStartMs = 0L
+    private var uiFrameMonitorRunning = false
+    private val uiFrameCallback =
+        object : Choreographer.FrameCallback {
+            override fun doFrame(frameTimeNanos: Long) {
+                if (!uiFrameMonitorRunning || released || !isAttachedToWindow) return
+                Choreographer.getInstance().postFrameCallback(this)
+                val now = SystemClock.uptimeMillis()
+                if (uiFrameWindowStartMs == 0L) uiFrameWindowStartMs = now
+                uiFrameCount++
+                val elapsed = now - uiFrameWindowStartMs
+                if (elapsed >= DIAG_UPDATE_INTERVAL_MS) {
+                    uiFps = uiFrameCount * 1000f / elapsed
+                    uiFrameCount = 0L
+                    uiFrameWindowStartMs = now
+                }
+            }
+        }
 
     // ---- 防挡蒙版（B 站 webmask；RenderThread 消费 maskHost 发布的 path 快照）----
     /** 由 MyPlayerView 注入：返回当前弹幕防挡蒙版宿主。 */
@@ -173,6 +243,11 @@ class GlDanmakuView @JvmOverloads constructor(
         color = Color.WHITE
         style = Paint.Style.FILL
     }
+    private val maskBounds = RectF()
+    private var maskApplied = false
+    private var maskFailOpen = false
+    private var maskCoveragePercent = 100
+    private var lastMaskWarningUptimeMs = 0L
 
     init {
         holder.addCallback(this)
@@ -192,9 +267,17 @@ class GlDanmakuView @JvmOverloads constructor(
 
     override val renderView: View get() = this
 
+    override fun setRenderVisible(visible: Boolean) {
+        super.setVisibility(if (visible) View.VISIBLE else View.GONE)
+        if (visible) requestRenderFrame()
+    }
+
     // ========== SurfaceHolder.Callback ==========
 
     override fun surfaceCreated(holder: SurfaceHolder) {
+        surfaceAvailable = true
+        startProviderSampler()
+        updateUiFrameMonitor(manualDebugOverlay || AppLog.isEnabled)
         renderHandler.obtainMessage(MSG_INIT_EGL, holder.surface).sendToTarget()
     }
 
@@ -206,7 +289,43 @@ class GlDanmakuView @JvmOverloads constructor(
         lastMaskVersion = -1
     }
 
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val fullWidth = MeasureSpec.getSize(widthMeasureSpec).coerceAtLeast(0)
+        val fullHeight = MeasureSpec.getSize(heightMeasureSpec).coerceAtLeast(0)
+        logicalViewportWidth = fullWidth
+        logicalViewportHeight = fullHeight
+        if (fullWidth <= 0 || fullHeight <= 0) {
+            setMeasuredDimension(fullWidth, fullHeight)
+            return
+        }
+
+        val cfg = runCatching { configProvider?.invoke() }.getOrNull() ?: providerSnapshot.config
+        val safeTop = viewportTopInsetPx.coerceIn(0, fullHeight)
+        val safeBottom = viewportBottomInsetPx.coerceIn(0, fullHeight - safeTop)
+        val availableHeight = (fullHeight - safeTop - safeBottom).coerceAtLeast(0)
+        val contentBottom = safeTop + (availableHeight * cfg.area.coerceIn(0f, 1f)).roundToInt()
+        val diagnosticBottom = if (debugOverlayEnabled) dp(150f) else 0
+        val bufferBandHeight = maxOf(contentBottom + dp(4f), diagnosticBottom, 1).coerceAtMost(fullHeight)
+        // View/SurfaceControl 的目标区域始终全屏；只有 producer buffer 使用内容 band 的
+        // 像素预算。renderViewportHeight 必须保持 fullHeight，才能抵消最终的纵向缩放。
+        val surfaceViewHeight = fullHeight
+        renderViewportWidth = fullWidth
+        renderViewportHeight = fullHeight
+        setMeasuredDimension(fullWidth, surfaceViewHeight)
+        val targetBufferWidth = (fullWidth * renderScale).roundToInt().coerceAtLeast(1)
+        val targetBufferHeight = (bufferBandHeight * renderScale).roundToInt().coerceAtLeast(1)
+        if (targetBufferWidth != fixedBufferWidth || targetBufferHeight != fixedBufferHeight) {
+            fixedBufferWidth = targetBufferWidth
+            fixedBufferHeight = targetBufferHeight
+            holder.setFixedSize(targetBufferWidth, targetBufferHeight)
+        }
+    }
+
     override fun surfaceDestroyed(holder: SurfaceHolder) {
+        // Published before the RenderThread receives MSG_RELEASE_EGL. An in-flight frame may
+        // observe eglSwapBuffers failure after SurfaceFlinger disconnects the producer; that is
+        // normal lifecycle teardown, not a renderer failure that should trigger Canvas fallback.
+        surfaceAvailable = false
         surfaceWidth = 0
         surfaceHeight = 0
         renderHandler.sendEmptyMessage(MSG_RELEASE_EGL)
@@ -216,22 +335,27 @@ class GlDanmakuView @JvmOverloads constructor(
 
     override fun setPositionProvider(provider: () -> Long) {
         positionProvider = provider
+        sampleProvidersSoon()
     }
 
     override fun setIsPlayingProvider(provider: () -> Boolean) {
         isPlayingProvider = provider
+        sampleProvidersSoon()
     }
 
     override fun setPlayWhenReadyProvider(provider: () -> Boolean) {
         playWhenReadyProvider = provider
+        sampleProvidersSoon()
     }
 
     override fun setPlaybackSpeedProvider(provider: () -> Float) {
         playbackSpeedProvider = provider
+        sampleProvidersSoon()
     }
 
     override fun setConfigProvider(provider: () -> DanmakuConfig) {
         configProvider = provider
+        sampleProvidersSoon()
     }
 
     override fun setDanmakus(list: List<Danmaku>) {
@@ -257,6 +381,11 @@ class GlDanmakuView @JvmOverloads constructor(
 
     override fun notifySeek(positionMs: Long) {
         seekSerial.incrementAndGet()
+        val old = providerSnapshot
+        providerSnapshot = old.copy(
+            positionMs = positionMs.coerceAtLeast(0L),
+            sampledAtRealtimeNs = SystemClock.elapsedRealtimeNanos(),
+        )
         actionHandler.obtainMessage(MSG_SEEK, positionMs).sendToTarget()
         // allowClockBackwardTo 必须与 stepTime 同线程（RenderThread），避免跨线程重置/写入交错。
         renderHandler.post {
@@ -279,6 +408,7 @@ class GlDanmakuView @JvmOverloads constructor(
     override fun setDebugEnabled(enabled: Boolean) {
         if (manualDebugOverlay == enabled) return
         manualDebugOverlay = enabled
+        updateUiFrameMonitor(enabled || AppLog.isEnabled)
         if (enabled) {
             // 立即采集一帧并刷新 View 层诊断面板。
             requestRenderFrame()
@@ -294,22 +424,8 @@ class GlDanmakuView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         if (!debugOverlayEnabled) return
-        recordUiFrame()
         val snap = diagSnapshot ?: return
         drawDiagnosticOverlay(canvas, snap)
-    }
-
-    /** UI FPS：主线程 onDraw 的调用间隔（Debug 时每帧刷新 onDraw，反映主线程 UI 绘制频率）。 */
-    private fun recordUiFrame() {
-        val now = SystemClock.uptimeMillis()
-        if (uiFrameWindowStartMs == 0L) uiFrameWindowStartMs = now
-        uiFrameCount++
-        val elapsed = now - uiFrameWindowStartMs
-        if (elapsed >= DIAG_UPDATE_INTERVAL_MS) {
-            uiFps = uiFrameCount * 1000f / elapsed
-            uiFrameCount = 0L
-            uiFrameWindowStartMs = now
-        }
     }
 
     /** Debug Overlay：左上角半透明面板，绘制渲染统计（方案 §70）。 */
@@ -327,13 +443,21 @@ class GlDanmakuView @JvmOverloads constructor(
             canvas.drawText(sb, 0, sb.length, padding, y, diagTextPaint)
             y += lineH
         }
-        line { append("DANMAKU GPU  ").append(if (snap.eglReady) "GL3" else "off") }
+        line {
+            append("DANMAKU [SURFACE-").append(if (snap.eglReady) "GL3" else "off").append(' ')
+                .append(surfaceWidth).append('x').append(surfaceHeight).append(']')
+        }
         line { append("UI fps=").append(fmt1(snap.uiFps)).append("  video=").append(fmt1(snap.videoFps)) }
         line { append("danmaku fps=").append(fmt1(snap.fps)).append("  avg=").append(fmt2(snap.frameAvgMs)).append("ms") }
         line { append("P50=").append(fmt2(snap.frameP50Ms)).append(" P95=").append(fmt2(snap.frameP95Ms)).append("ms") }
         line { append("P99=").append(fmt2(snap.frameP99Ms)).append("ms  active=").append(snap.active) }
         line { append("snapshot=").append(snap.snapshotCount).append("  atlas=").append(snap.atlasPages).append("p") }
-        line { append("drawCalls=").append(snap.drawCalls).append("  v=").append(fmt2(snap.frameP95Ms)).append("p95") }
+        line {
+            append("mask=")
+                .append(if (snap.maskFailOpen) "bypass" else if (snap.maskApplied) "on" else "off")
+                .append("  visible=").append(snap.maskCoveragePercent).append('%')
+        }
+        line { append("drawCalls=").append(snap.drawCalls).append("  swap=").append(fmt2(snap.swapMs)).append("ms") }
     }
 
     private fun fmt1(v: Float): String = String.format(Locale.US, "%.1f", v)
@@ -341,6 +465,8 @@ class GlDanmakuView @JvmOverloads constructor(
     private fun fmt2(v: Float): String = String.format(Locale.US, "%.2f", v)
 
     override fun onDetachedFromWindow() {
+        updateUiFrameMonitor(false)
+        stopProviderSampler()
         super.onDetachedFromWindow()
         release()
     }
@@ -348,6 +474,7 @@ class GlDanmakuView @JvmOverloads constructor(
     private fun release() {
         if (released) return
         released = true
+        stopProviderSampler()
         renderHandler.post {
             renderLoopRunning = false
             runCatching { Choreographer.getInstance().removeFrameCallback(frameCallback) }
@@ -361,6 +488,72 @@ class GlDanmakuView @JvmOverloads constructor(
     private fun requestRenderFrame() {
         if (released) return
         renderHandler.post { startRenderLoopIfNeeded() }
+    }
+
+    private fun startProviderSampler() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { startProviderSampler() }
+            return
+        }
+        if (providerSamplerRunning || released || !isAttachedToWindow) return
+        providerSamplerRunning = true
+        mainHandler.removeCallbacks(providerSampler)
+        sampleProvidersOnMain()
+        mainHandler.postDelayed(providerSampler, PROVIDER_SAMPLE_INTERVAL_MS)
+    }
+
+    private fun stopProviderSampler() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { stopProviderSampler() }
+            return
+        }
+        providerSamplerRunning = false
+        mainHandler.removeCallbacks(providerSampler)
+    }
+
+    private fun sampleProvidersSoon() {
+        mainHandler.post {
+            if (!released) sampleProvidersOnMain()
+        }
+    }
+
+    private fun sampleProvidersOnMain() {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        val previous = providerSnapshot
+        val speed =
+            runCatching { playbackSpeedProvider?.invoke() }.getOrNull()
+                ?.takeIf { it.isFinite() && it > 0f }
+                ?: previous.speed
+        val next =
+            ProviderSnapshot(
+                positionMs = runCatching { positionProvider?.invoke() }.getOrNull()?.coerceAtLeast(0L)
+                    ?: previous.positionMs,
+                sampledAtRealtimeNs = SystemClock.elapsedRealtimeNanos(),
+                isPlaying = runCatching { isPlayingProvider?.invoke() }.getOrNull() ?: previous.isPlaying,
+                playWhenReady = runCatching { playWhenReadyProvider?.invoke() }.getOrNull()
+                    ?: previous.playWhenReady,
+                speed = speed,
+                config = runCatching { configProvider?.invoke() }.getOrNull() ?: previous.config,
+            )
+        providerSnapshot = next
+        if (next.config.area != previous.config.area) requestLayout()
+        if (providerSnapshot.isPlaying || providerSnapshot.playWhenReady) requestRenderFrame()
+    }
+
+    private fun updateUiFrameMonitor(enabled: Boolean) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { updateUiFrameMonitor(enabled) }
+            return
+        }
+        if (enabled == uiFrameMonitorRunning) return
+        uiFrameMonitorRunning = enabled
+        val choreographer = Choreographer.getInstance()
+        choreographer.removeFrameCallback(uiFrameCallback)
+        uiFrameCount = 0L
+        uiFrameWindowStartMs = 0L
+        if (enabled && isAttachedToWindow && !released) {
+            choreographer.postFrameCallback(uiFrameCallback)
+        }
     }
 
     private fun startRenderLoopIfNeeded() {
@@ -411,27 +604,32 @@ class GlDanmakuView @JvmOverloads constructor(
      * Debug Overlay 采集：帧耗时写入 RingBuffer，每 [DIAG_UPDATE_INTERVAL_MS] 计算一次
      * fps / avg / P50 / P95 / P99 快照并刷新 View 层。排序仅每 500ms 一次（600 元素），可接受。
      */
-    private fun updateDiagnosticRing(frameNs: Long, activeCount: Int, atlasPages: Int) {
+    private fun updateDiagnosticRing(
+        frameNs: Long,
+        activeCount: Int,
+        snapshotCount: Int,
+        atlasPages: Int,
+        drawCalls: Int,
+    ) {
         // Debug Overlay 跟随日志开关：开日志自动显示诊断面板（现场排查），关日志不采样零开销。
         val overlay = AppLog.isEnabled || manualDebugOverlay
         if (debugOverlayEnabled != overlay) {
             debugOverlayEnabled = overlay
-            if (overlay) postInvalidateOnAnimation()
+            updateUiFrameMonitor(overlay)
+            postInvalidateOnAnimation()
         }
         if (!overlay) return
-        // Debug 时每帧刷新 View 层：onDraw 被 vsync 驱动，既统计 UI FPS 也实时更新面板。
-        postInvalidateOnAnimation()
         frameTimeRingNs[frameTimeRingHead] = frameNs
         frameTimeRingHead = (frameTimeRingHead + 1) % DIAG_RING_CAPACITY
         if (frameTimeRingCount < DIAG_RING_CAPACITY) frameTimeRingCount++
+        diagnosticFrameTotal++
         val nowUptime = SystemClock.uptimeMillis()
         if (nowUptime - lastDiagUpdateUptimeMs < DIAG_UPDATE_INTERVAL_MS) return
-        val totalCount = frameTimeRingCount
         val deltaMs = nowUptime - lastDiagUpdateUptimeMs
-        val deltaCount = totalCount - lastDiagFrameCount
+        val deltaCount = diagnosticFrameTotal - lastDiagFrameTotal
         lastDiagUpdateUptimeMs = nowUptime
-        lastDiagFrameCount = totalCount
-        val count = totalCount
+        lastDiagFrameTotal = diagnosticFrameTotal
+        val count = frameTimeRingCount
         val copy = frameTimeRingNs.copyOf(count)
         copy.sort()
         diagSnapshot =
@@ -445,11 +643,18 @@ class GlDanmakuView @JvmOverloads constructor(
                 frameP95Ms = percentileMs(copy, 0.95),
                 frameP99Ms = percentileMs(copy, 0.99),
                 active = activeCount,
-                snapshotCount = activeCount,
+                snapshotCount = snapshotCount,
                 atlasPages = atlasPages,
-                drawCalls = atlasPages,
+                drawCalls = drawCalls,
+                swapMs = lastSwapMs,
                 eglReady = eglReady,
+                maskApplied = maskApplied,
+                maskFailOpen = maskFailOpen,
+                maskCoveragePercent = maskCoveragePercent,
             )
+        // The diagnostics View layer is intentionally refreshed only at 2Hz. Invalidating it at
+        // GL frame rate would put the full player window back on the HWUI critical path.
+        postInvalidateOnAnimation()
     }
 
     private fun percentileMs(sorted: LongArray, q: Double): Float {
@@ -464,28 +669,82 @@ class GlDanmakuView @JvmOverloads constructor(
      * mask path 语义：path 内部 = 弹幕可显示区（白），外部 = 遮挡区（隐藏弹幕）。
      */
     private fun updateMaskIfNeeded() {
-        val host = maskHostProvider?.invoke() ?: return
+        val host = maskHostProvider?.invoke()
+        if (host == null) {
+            renderer?.setMask(0)
+            maskApplied = false
+            maskFailOpen = false
+            maskCoveragePercent = 100
+            lastMaskVersion = -1
+            return
+        }
         val version = host.surfaceMaskVersion
         if (version == lastMaskVersion) return
         lastMaskVersion = version
         if (host.readSurfaceMask(maskPath)) {
-            rasterizeAndUploadMask()
-            renderer?.setMask(maskTextureId)
+            val coverage = runCatching { rasterizeAndUploadMask() }
+                .onFailure { logMaskFailOpen("rasterize_failed:${it.javaClass.simpleName}") }
+                .getOrNull()
+            if (coverage != null) {
+                renderer?.setMask(maskTextureId)
+                maskApplied = true
+                maskFailOpen = false
+                maskCoveragePercent = (coverage * 100f).roundToInt().coerceIn(1, 100)
+            } else {
+                // 蒙版数据异常时优先保证弹幕可见，下一次有效版本到来后自动恢复裁剪。
+                renderer?.setMask(0)
+                maskApplied = false
+                maskFailOpen = true
+                maskCoveragePercent = 0
+                logMaskFailOpen("empty_or_outside_viewport")
+            }
         } else {
             renderer?.setMask(0)
+            maskApplied = false
+            maskFailOpen = false
+            maskCoveragePercent = 100
         }
     }
 
-    private fun rasterizeAndUploadMask() {
-        val w = surfaceWidth.coerceAtLeast(1)
-        val h = surfaceHeight.coerceAtLeast(1)
+    /** 返回蒙版可见区采样比例；无有效可见区时返回 null，调用方执行 fail-open。 */
+    private fun rasterizeAndUploadMask(): Float? {
+        val w = surfaceWidth
+        val h = surfaceHeight
+        val viewportW = renderViewportWidth
+        val viewportH = renderViewportHeight
+        if (w <= 0 || h <= 0 || viewportW <= 0 || viewportH <= 0 || maskPath.isEmpty) return null
+        maskPath.computeBounds(maskBounds, true)
+        if (!maskBounds.left.isFinite() || !maskBounds.top.isFinite() ||
+            !maskBounds.right.isFinite() || !maskBounds.bottom.isFinite()
+        ) return null
+        val intersectionWidth =
+            minOf(maskBounds.right, viewportW.toFloat()) - maxOf(maskBounds.left, 0f)
+        val intersectionHeight =
+            minOf(maskBounds.bottom, viewportH.toFloat()) - maxOf(maskBounds.top, 0f)
+        if (intersectionWidth <= 0f || intersectionHeight <= 0f) return null
         if (maskBitmap.width != w || maskBitmap.height != h) {
             maskBitmap.recycle()
             maskBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8)
         }
         maskBitmap.eraseColor(0x00000000)
         maskCanvas.setBitmap(maskBitmap)
+        val saveCount = maskCanvas.save()
+        maskCanvas.scale(
+            w.toFloat() / renderViewportWidth.coerceAtLeast(1),
+            h.toFloat() / renderViewportHeight.coerceAtLeast(1),
+        )
         maskCanvas.drawPath(maskPath, maskPaint)
+        maskCanvas.restoreToCount(saveCount)
+        var visibleSamples = 0
+        val totalSamples = MASK_SAMPLE_COLUMNS * MASK_SAMPLE_ROWS
+        for (row in 0 until MASK_SAMPLE_ROWS) {
+            val y = (((row + 0.5f) * h) / MASK_SAMPLE_ROWS).toInt().coerceIn(0, h - 1)
+            for (column in 0 until MASK_SAMPLE_COLUMNS) {
+                val x = (((column + 0.5f) * w) / MASK_SAMPLE_COLUMNS).toInt().coerceIn(0, w - 1)
+                if (Color.alpha(maskBitmap.getPixel(x, y)) > 0) visibleSamples++
+            }
+        }
+        if (visibleSamples == 0) return null
         if (maskTextureId == 0) {
             val ids = IntArray(1)
             GLES30.glGenTextures(1, ids, 0)
@@ -499,6 +758,19 @@ class GlDanmakuView @JvmOverloads constructor(
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, maskTextureId)
         GLES30.glPixelStorei(GLES30.GL_UNPACK_ALIGNMENT, 1)
         GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, maskBitmap, 0)
+        return visibleSamples.toFloat() / totalSamples
+    }
+
+    private fun logMaskFailOpen(reason: String) {
+        if (!AppLog.isEnabled) return
+        val now = SystemClock.uptimeMillis()
+        if (now - lastMaskWarningUptimeMs < MASK_WARNING_INTERVAL_MS) return
+        lastMaskWarningUptimeMs = now
+        AppLog.w(
+            TAG,
+            "mask fail-open reason=$reason surface=${surfaceWidth}x$surfaceHeight " +
+                "viewport=${renderViewportWidth}x$renderViewportHeight bounds=$maskBounds",
+        )
     }
 
     // ========== RenderThread ==========
@@ -514,10 +786,19 @@ class GlDanmakuView @JvmOverloads constructor(
                 MSG_VIEWPORT -> {
                     val w = msg.arg1
                     val h = msg.arg2
-                    renderer?.setViewport(w, h)
-                    actionHandler.obtainMessage(MSG_VIEWPORT, w, h).sendToTarget()
+                    renderer?.setViewport(
+                        surfaceWidth = w,
+                        surfaceHeight = h,
+                        logicalWidth = renderViewportWidth.coerceAtLeast(w),
+                        logicalHeight = renderViewportHeight.coerceAtLeast(h),
+                    )
+                    actionHandler.obtainMessage(
+                        MSG_VIEWPORT,
+                        logicalViewportWidth.coerceAtLeast(w),
+                        logicalViewportHeight.coerceAtLeast(h),
+                    ).sendToTarget()
                 }
-                MSG_FRAME -> doRenderFrame()
+                MSG_FRAME -> renderAndSchedule(SystemClock.elapsedRealtimeNanos())
             }
         }
     }
@@ -537,7 +818,12 @@ class GlDanmakuView @JvmOverloads constructor(
             val r = GlInstancedRenderer()
             r.init()
             val a = GlTextureAtlas()
-            r.setViewport(surfaceWidth, surfaceHeight)
+            r.setViewport(
+                surfaceWidth = surfaceWidth,
+                surfaceHeight = surfaceHeight,
+                logicalWidth = renderViewportWidth.coerceAtLeast(surfaceWidth),
+                logicalHeight = renderViewportHeight.coerceAtLeast(surfaceHeight),
+            )
             egl = e
             renderer = r
             atlas = a
@@ -574,24 +860,35 @@ class GlDanmakuView @JvmOverloads constructor(
 
     private inner class FrameCallback : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
-            if (released || !eglReady) {
-                renderLoopRunning = false
-                return
+            renderAndSchedule(frameTimeNanos)
+        }
+    }
+
+    private fun renderAndSchedule(frameTimeNanos: Long) {
+        val renderStartedNs = System.nanoTime()
+        if (released || !eglReady) {
+            renderLoopRunning = false
+            return
+        }
+        try {
+            doRenderFrame(frameTimeNanos)
+        } catch (t: Throwable) {
+            if (AppLog.isEnabled) {
+                AppLog.w(TAG, "render frame failed", t)
             }
-            // Pre-arm 下一帧回调：在干活之前注册，避免本回调处理靠近帧边界时错过下一 vsync
-            // （对齐 danmaku-smoothness 分支的 pre-arm 优化）。
-            Choreographer.getInstance().postFrameCallback(this)
-            try {
-                doRenderFrame()
-            } catch (t: Throwable) {
-                if (AppLog.isEnabled) {
-                    AppLog.w(TAG, "render frame failed", t)
-                }
-            }
-            // doRenderFrame 可能停止循环（暂停/弹幕关闭/释放）：若已停止则取消 pre-arm 的回调。
-            if (!renderLoopRunning) {
-                Choreographer.getInstance().removeFrameCallback(this)
-            }
+        }
+        if (!renderLoopRunning || released || !eglReady) return
+
+        val renderElapsedNs = (System.nanoTime() - renderStartedNs).coerceAtLeast(0L)
+        if (renderElapsedNs >= TARGET_FRAME_NS) {
+            // A late frame already crossed at least one vsync boundary. Waiting for another
+            // Choreographer callback adds a second idle gap (25ms render became a ~40ms frame).
+            // Queue exactly one immediate frame using the latest media clock; historical frames
+            // are never replayed, and Handler serialization prevents catch-up bursts.
+            renderHandler.sendEmptyMessage(MSG_FRAME)
+        } else {
+            // Fast devices remain aligned to display vsync and never busy-spin above 60fps.
+            Choreographer.getInstance().postFrameCallback(frameCallback)
         }
     }
 
@@ -599,9 +896,10 @@ class GlDanmakuView @JvmOverloads constructor(
      * 渲染单帧：时钟推进 → 快照消费 → Atlas 上传 → 实例构建 → Instanced 绘制 → 交换缓冲。
      * RenderThread 独占，禁止对象分配于热路径（预分配缓冲 + 原语遍历）。
      */
-    private fun doRenderFrame() {
+    private fun doRenderFrame(frameTimeNanos: Long) {
         val perfStartNs = System.nanoTime()
-        val cfg = configProvider?.invoke() ?: defaultConfig()
+        val sampled = providerSnapshot
+        val cfg = sampled.config
         if (cfg != lastConfig) {
             lastConfig = cfg
             actionHandler.obtainMessage(MSG_CONFIG, cfg).sendToTarget()
@@ -613,10 +911,16 @@ class GlDanmakuView @JvmOverloads constructor(
             }
         }
 
-        val rawPos = positionProvider?.invoke()?.coerceAtLeast(0L) ?: 0L
-        val isPlaying = runCatching { isPlayingProvider?.invoke() }.getOrNull() ?: false
-        val playWhenReady = runCatching { playWhenReadyProvider?.invoke() }.getOrNull() ?: false
-        val speed = runCatching { playbackSpeedProvider?.invoke() }.getOrNull()?.takeIf { it.isFinite() && it > 0f } ?: 1f
+        val isPlaying = sampled.isPlaying
+        val playWhenReady = sampled.playWhenReady
+        val speed = sampled.speed
+        val elapsedSinceSampleNs = (frameTimeNanos - sampled.sampledAtRealtimeNs).coerceAtLeast(0L)
+        val rawPos =
+            if (isPlaying) {
+                sampled.positionMs + (elapsedSinceSampleNs.toDouble() / 1_000_000.0 * speed).toLong()
+            } else {
+                sampled.positionMs
+            }
 
         val frameId = uiFrameId.incrementAndGet()
         val smoothPos = timer.step(System.nanoTime(), rawPos, isPlaying, speed, seekSerial.get())
@@ -631,7 +935,7 @@ class GlDanmakuView @JvmOverloads constructor(
         val a = atlas
         val e = egl
         if (r == null || a == null || e == null) return
-        val vw = surfaceWidth.coerceAtLeast(1)
+        val vw = logicalViewportWidth.coerceAtLeast(surfaceWidth).coerceAtLeast(1)
 
         if (!cfg.enabled) {
             // 弹幕关闭：清屏一帧后停止渲染循环。
@@ -673,7 +977,23 @@ class GlDanmakuView @JvmOverloads constructor(
             engine.releaseRenderSnapshot(snapshot)
         }
 
-        e.swapBuffers()
+        e.setPresentationTime(frameTimeNanos)
+        val swapStartedNs = System.nanoTime()
+        val swapSucceeded = e.swapBuffers()
+        val swapNs = (System.nanoTime() - swapStartedNs).coerceAtLeast(0L)
+        lastSwapMs = (swapNs / 1_000_000.0).toFloat()
+        perfAccumSwapNs += swapNs
+        if (swapNs > perfMaxSwapNs) perfMaxSwapNs = swapNs
+        if (!swapSucceeded) {
+            if (!surfaceAvailable || released) {
+                renderLoopRunning = false
+                return
+            }
+            if (AppLog.isEnabled) AppLog.w(TAG, "eglSwapBuffers failed; switching to Canvas fallback")
+            renderLoopRunning = false
+            onEglFailed?.invoke()
+            return
+        }
 
         // 性能采样：汇总帧耗时/负载，周期输出（对齐方案 §69 性能监控）。
         perfFrameCount++
@@ -681,23 +1001,33 @@ class GlDanmakuView @JvmOverloads constructor(
         perfAccumFrameNs += frameNs
         if (frameNs > perfMaxFrameNs) perfMaxFrameNs = frameNs
         // Debug Overlay：帧耗时 RingBuffer + 分位数（RenderThread 采集，onDraw 主线程消费）。
-        updateDiagnosticRing(frameNs, r.lastDrawnInstanceCount, a.pageCount())
+        updateDiagnosticRing(
+            frameNs,
+            r.lastDrawnInstanceCount,
+            snapshot.count,
+            a.pageCount(),
+            r.lastDrawCallCount,
+        )
         val nowUptimeMs = android.os.SystemClock.uptimeMillis()
         if (nowUptimeMs - perfLastLogUptimeMs >= PERF_LOG_INTERVAL_MS) {
             perfLastLogUptimeMs = nowUptimeMs
             if (AppLog.isEnabled) {
                 val count = perfFrameCount.coerceAtLeast(1)
                 val avgMs = perfAccumFrameNs.toDouble() / count / 1_000_000.0
+                val avgSwapMs = perfAccumSwapNs.toDouble() / count / 1_000_000.0
                 AppLog.i(
                     TAG,
                     "perf fps=${String.format(Locale.US, "%.1f", count.toFloat() * 1000f / PERF_LOG_INTERVAL_MS)} " +
                         "avg=${String.format(Locale.US, "%.2f", avgMs)}ms " +
+                        "swap=${String.format(Locale.US, "%.2f", avgSwapMs)}/${String.format(Locale.US, "%.2f", perfMaxSwapNs / 1_000_000.0)}ms " +
                         "max=${String.format(Locale.US, "%.2f", perfMaxFrameNs / 1_000_000.0)}ms " +
                         "active=${r.lastDrawnInstanceCount} snapshot=${snapshot.count} atlasPages=${a.pageCount()}"
                 )
             }
             perfAccumFrameNs = 0L
             perfMaxFrameNs = 0L
+            perfAccumSwapNs = 0L
+            perfMaxSwapNs = 0L
             perfFrameCount = 0
         }
 
@@ -789,5 +1119,9 @@ internal data class GlDiagnosticSnapshot(
     val snapshotCount: Int,
     val atlasPages: Int,
     val drawCalls: Int,
+    val swapMs: Float,
     val eglReady: Boolean,
+    val maskApplied: Boolean,
+    val maskFailOpen: Boolean,
+    val maskCoveragePercent: Int,
 )
