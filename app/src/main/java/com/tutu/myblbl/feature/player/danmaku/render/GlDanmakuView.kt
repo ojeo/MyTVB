@@ -24,7 +24,6 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
 import android.view.View.MeasureSpec
-import com.tutu.myblbl.BuildConfig
 import com.tutu.myblbl.core.common.log.AppLog
 import com.tutu.myblbl.feature.player.danmaku.CacheBuildResult
 import com.tutu.myblbl.feature.player.danmaku.CacheManager
@@ -164,9 +163,15 @@ class GlDanmakuView @JvmOverloads constructor(
     private var fixedBufferHeight = 0
     @Volatile private var surfaceAvailable = false
     // 两个 SurfaceView 必须保持相同的全屏 View 几何，避免 SurfaceFlinger 在添加/更新
-    // 顶部 band 时短暂裁切视频 Surface。内部 buffer 仍可只保留内容 band 的像素量；
-    // GL 投影使用完整视口，SurfaceFlinger 拉伸后字体与运动坐标仍保持正确比例。
-    private val renderScale = 0.5f
+    // 顶部 band 时短暂裁切视频 Surface。producer buffer 也按全屏分配（× renderScale）：
+    // GL 投影用完整逻辑视口，SurfaceFlinger 又把整个 buffer 拉伸回全屏矩形，只有 buffer
+    // 与逻辑视口等高，横纵向解析度才都等于 renderScale（早期 buffer 只覆盖"内容 band"，
+    // 纵向会被额外降采样 → 横清竖糊，已改回全屏 buffer）。
+    // renderScale = 1.0 为原生分辨率；调低可省 buffer 内存，代价是弹幕被拉伸放大后变糊。
+    // 真机实测（Amlogic S912 / 1080p）：1.0 与 0.75 的 swap（2.75ms vs 2.87ms）、
+    // avg 帧耗时（7.86ms vs 8.05ms）、fps（56.0 vs 55.6）三项全在噪声范围内——swap 是
+    // 延迟受限而非带宽受限，降分辨率换不到任何性能，只会白白损失清晰度。保持 1.0。
+    private val renderScale = 1.0f
     @Volatile private var released = false
     private var renderLoopRunning = false
     private val frameCallback = FrameCallback()
@@ -190,10 +195,14 @@ class GlDanmakuView @JvmOverloads constructor(
     @Volatile private var lastSwapMs = 0f
 
     // ---- Debug Overlay（方案 §70；RenderThread 采集 RingBuffer，onDraw 主线程绘制）----
-    // Debug APKs are validation builds: keep the requested on-screen diagnostics visible even
-    // when persistent file logging is off. Release builds still default to zero-overhead off.
-    @Volatile private var debugOverlayEnabled = BuildConfig.DEBUG
-    @Volatile private var manualDebugOverlay = BuildConfig.DEBUG
+    // 唯一开关是 AppLog.isEnabled（设置 → 日志记录）：开日志才显示诊断面板（现场排查），
+    // 关日志则完全不采样、零开销。debug 包也不再强制常开——面板自身有固定开销
+    // （每 500ms 一次全窗口 postInvalidateOnAnimation + RingBuffer 拷贝与排序、
+    // uiFrameMonitor 每帧回调），常开会把测出来的 fps / 帧耗时污染掉，
+    // 害得人去为"面板自己的开销"做画质妥协（如把 renderScale 降到 0.75）。
+    @Volatile private var debugOverlayEnabled = AppLog.isEnabled
+    /** [setDebugEnabled] 的手动开关；默认关闭，保证面板只跟随日志开关。 */
+    @Volatile private var manualDebugOverlay = false
     private val frameTimeRingNs = LongArray(DIAG_RING_CAPACITY)
     private var frameTimeRingHead = 0
     private var frameTimeRingCount = 0
@@ -299,21 +308,15 @@ class GlDanmakuView @JvmOverloads constructor(
             return
         }
 
-        val cfg = runCatching { configProvider?.invoke() }.getOrNull() ?: providerSnapshot.config
-        val safeTop = viewportTopInsetPx.coerceIn(0, fullHeight)
-        val safeBottom = viewportBottomInsetPx.coerceIn(0, fullHeight - safeTop)
-        val availableHeight = (fullHeight - safeTop - safeBottom).coerceAtLeast(0)
-        val contentBottom = safeTop + (availableHeight * cfg.area.coerceIn(0f, 1f)).roundToInt()
-        val diagnosticBottom = if (debugOverlayEnabled) dp(150f) else 0
-        val bufferBandHeight = maxOf(contentBottom + dp(4f), diagnosticBottom, 1).coerceAtMost(fullHeight)
-        // View/SurfaceControl 的目标区域始终全屏；只有 producer buffer 使用内容 band 的
-        // 像素预算。renderViewportHeight 必须保持 fullHeight，才能抵消最终的纵向缩放。
-        val surfaceViewHeight = fullHeight
+        // View 几何、逻辑视口与 producer buffer 三者都保持全屏，仅由 renderScale 决定
+        // 实际光栅化分辨率。buffer 尺寸不再随"弹幕区域 area"变化，从而：
+        // - 横纵向解析度恒等于 renderScale，不因 area 调小而纵向发虚；
+        // - 调 area / 开关 Debug Overlay 不再触发 setFixedSize，减少 Surface 重建。
         renderViewportWidth = fullWidth
         renderViewportHeight = fullHeight
-        setMeasuredDimension(fullWidth, surfaceViewHeight)
+        setMeasuredDimension(fullWidth, fullHeight)
         val targetBufferWidth = (fullWidth * renderScale).roundToInt().coerceAtLeast(1)
-        val targetBufferHeight = (bufferBandHeight * renderScale).roundToInt().coerceAtLeast(1)
+        val targetBufferHeight = (fullHeight * renderScale).roundToInt().coerceAtLeast(1)
         if (targetBufferWidth != fixedBufferWidth || targetBufferHeight != fixedBufferHeight) {
             fixedBufferWidth = targetBufferWidth
             fixedBufferHeight = targetBufferHeight
@@ -536,7 +539,7 @@ class GlDanmakuView @JvmOverloads constructor(
                 config = runCatching { configProvider?.invoke() }.getOrNull() ?: previous.config,
             )
         providerSnapshot = next
-        if (next.config.area != previous.config.area) requestLayout()
+        // area 已不再参与 measure（buffer 恒为全屏），改弹幕区域无需 requestLayout。
         if (providerSnapshot.isPlaying || providerSnapshot.playWhenReady) requestRenderFrame()
     }
 
@@ -881,13 +884,15 @@ class GlDanmakuView @JvmOverloads constructor(
 
         val renderElapsedNs = (System.nanoTime() - renderStartedNs).coerceAtLeast(0L)
         if (renderElapsedNs >= TARGET_FRAME_NS) {
-            // A late frame already crossed at least one vsync boundary. Waiting for another
-            // Choreographer callback adds a second idle gap (25ms render became a ~40ms frame).
-            // Queue exactly one immediate frame using the latest media clock; historical frames
-            // are never replayed, and Handler serialization prevents catch-up bursts.
+            // 慢帧立即补一帧：本帧已错过至少一个 vsync，若再等下一个 Choreographer 回调
+            // 会叠加第二个空档（25ms 的帧变成 ~40ms 的间隔），滚动弹幕随之"顿一下"。
+            // 用最新媒体时钟立即排一帧；历史帧不会重放，Handler 串行化避免追赶爆发。
+            // 注：真机（Amlogic S912）swap 仅 2.6~3ms、avg 7~8ms，慢帧来自偶发解码/合成
+            // 竞争；立即补帧能明显抹平滚动抖动。"纯 vsync 单一节拍"曾被误判为更稳，
+            // 实测反而放大了非匀速（每个慢帧后多等最多 16.67ms），已回退。
             renderHandler.sendEmptyMessage(MSG_FRAME)
         } else {
-            // Fast devices remain aligned to display vsync and never busy-spin above 60fps.
+            // 快帧保持 vsync 对齐，不忙等、不上冲 60fps。
             Choreographer.getInstance().postFrameCallback(frameCallback)
         }
     }

@@ -2,6 +2,7 @@ package com.tutu.myblbl.feature.player.view
 
 import android.content.Context
 import com.tutu.myblbl.core.common.settings.AppSettingsDataStore
+import com.tutu.myblbl.feature.player.danmaku.DanmakuRenderMode
 import com.tutu.myblbl.feature.player.danmaku.DanmakuTrackSpacing
 import com.tutu.myblbl.model.dm.DmScreenArea
 import org.koin.mp.KoinPlatform
@@ -47,7 +48,22 @@ internal class MyPlayerSettingPreferenceStore(
             dmAllowTop = appSettings.getCachedString(MyPlayerSettingView.KEY_DM_ALLOW_TOP)?.let { it == "开" } ?: false,
             dmAllowBottom = appSettings.getCachedString(MyPlayerSettingView.KEY_DM_ALLOW_BOTTOM)?.let { it == "开" } ?: false,
             dmMergeDuplicate = appSettings.getCachedString(MyPlayerSettingView.KEY_DM_MERGE_DUPLICATE)?.let { it == "开" } ?: true,
-            dmSmartShield = appSettings.getCachedString(MyPlayerSettingView.KEY_DM_SMART_SHIELD)?.let { it == "开" } ?: false
+            dmSmartShield = appSettings.getCachedString(MyPlayerSettingView.KEY_DM_SMART_SHIELD)?.let { it == "开" } ?: false,
+            dmRenderMode = appSettings.getCachedString(MyPlayerSettingView.KEY_DM_RENDER_MODE)?.let {
+                when (it) {
+                    "Canvas" -> DanmakuRenderMode.CANVAS
+                    else -> DanmakuRenderMode.GL
+                }
+            } ?: DanmakuRenderMode.GL
         )
+    }
+
+    /** 持久化弹幕渲染后端（GPU / Canvas）。 */
+    fun saveDmRenderMode(mode: DanmakuRenderMode) {
+        val value = when (mode) {
+            DanmakuRenderMode.GL -> "GPU"
+            DanmakuRenderMode.CANVAS -> "Canvas"
+        }
+        appSettings.putStringAsync(MyPlayerSettingView.KEY_DM_RENDER_MODE, value)
     }
 }

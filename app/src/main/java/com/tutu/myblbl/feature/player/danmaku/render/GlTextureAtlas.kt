@@ -25,8 +25,8 @@ internal class AtlasSlot(
  *
  * 设计要点（对齐高性能弹幕方案）：
  * - Shelf Allocator 行式分配：高度相近的弹幕文本行复用同一 shelf，实现简单且利用率足够。
- * - 上传预算：每帧限制 CPU→GPU 上传字节数（默认 1MB），超预算条目本帧跳过（与 Canvas 引擎
- *   的 cache miss 语义一致），避免一帧上传大量纹理阻塞 RenderThread。
+ * - 上传预算：每帧限制 CPU→GPU 上传字节数（见 [ATLAS_UPLOAD_BUDGET_BYTES]），超预算条目
+ *   本帧跳过（与 Canvas 引擎的 cache miss 语义一致），避免一帧上传大量纹理阻塞 RenderThread。
  * - 页淘汰：达到页数上限时淘汰"最久未使用"页（重置其 shelf 状态，纹理内存保留复用）。
  *   被淘汰页上的弹幕若仍被引用，下一帧会重新上传（bitmap 由 CacheManager 引用计数保活）。
  * - 所有方法只能在 RenderThread（持有 GL context）调用。
@@ -262,6 +262,19 @@ internal class GlTextureAtlas(
         const val ATLAS_PAGE_WIDTH = 2048
         const val ATLAS_PAGE_HEIGHT = 512
         const val ATLAS_MAX_PAGES = 6
-        private const val ATLAS_UPLOAD_BUDGET_BYTES = 1_048_576L
+
+        /**
+         * 每帧 CPU→GPU 上传字节上限。
+         *
+         * 为什么不设大：真机实测（Amlogic S912 / 1080p / renderScale=1.0）稳态 avg 帧耗时
+         * 仅 7ms、swap 仅 2.5ms，说明平均负载很轻；但偶发尖峰达 20~42ms（极端 74ms），
+         * 主要来自单帧集中上传——1MB 预算允许一帧塞入约 20 条弹幕纹理，一次性上传会顶爆
+         * vsync。降到 512KB 后单帧最坏情况减半，尖峰被摊到相邻帧。
+         *
+         * 为什么不设小：单条弹幕纹理约 50KB（1080p 常规字号、15 字左右），512KB 仍允许
+         * 约 10 条/帧 ≈ 600 条/秒，远超正常弹幕入场速率，不会造成可见的入场延迟；
+         * 只在 seek / 样式切换后的批量重建窗口才会用到多帧分摊。
+         */
+        private const val ATLAS_UPLOAD_BUDGET_BYTES = 524_288L
     }
 }

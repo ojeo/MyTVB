@@ -250,6 +250,10 @@ class MyPlayerView @JvmOverloads constructor(
     private var liteDanmakuView: DanmakuRenderHost? = null
     private var liteDanmakuController: BlblDanmakuController? = null
 
+    // 最近一次 setDanmakuData 的数据，供"渲染引擎"切换后重喂新引擎。
+    private var lastDanmakuData: List<DmModel>? = null
+    private var lastDanmakuFilterContext: DanmakuFilterContext = DanmakuFilterContext.EMPTY
+
     // ---- 视频渲染帧率统计（Debug Overlay 用）：VideoFrameMetadataListener 每帧渲染前回调计数 ----
     @Volatile private var videoFps = 0f
     private var videoFrameCount = 0L
@@ -752,6 +756,10 @@ class MyPlayerView @JvmOverloads constructor(
                 if (enabled) {
                     retryPendingDmMaskLoad()
                 }
+            }
+
+            override fun onDmRenderModeChange(mode: DanmakuRenderMode) {
+                switchDanmakuEngine(mode)
             }
         })
         syncDanmakuSettings()
@@ -2788,6 +2796,9 @@ class MyPlayerView @JvmOverloads constructor(
      */
     fun setupDanmakuEngine() {
         if (liteDanmakuController != null) return
+        // 从设置面板读取持久化的渲染后端（panel state 已在创建时从 AppSettings 加载），
+        // 使 App 设置里的选择在每次播放/重启后生效。
+        settingView?.getDmRenderMode()?.let { danmakuRenderMode = it }
         val view: DanmakuRenderHost =
             when (resolveDanmakuRenderMode()) {
                 DanmakuRenderMode.GL ->
@@ -2814,6 +2825,30 @@ class MyPlayerView @JvmOverloads constructor(
         // 否则默认配置与用户配置不同会在启动后立刻改 fixed buffer 尺寸，部分设备会
         // 拒收旧尺寸缓冲并留下透明空层。
         syncDanmakuSettings()
+        restoreOverlayZOrder()
+    }
+
+    /**
+     * 切换弹幕渲染后端并立即生效：拆掉当前引擎 → 用新模式重建 → 重喂数据与位置。
+     * 供设置面板的"渲染引擎"开关调用；同模式直接返回，不重建。
+     */
+    fun switchDanmakuEngine(mode: DanmakuRenderMode) {
+        if (resolveDanmakuRenderMode() == mode) return
+        // 拆掉当前引擎（先 release 控制器，再从蒙版宿主移除渲染 View）。
+        liteDanmakuController?.release()
+        liteDanmakuView?.renderView?.let { view -> (view.parent as? ViewGroup)?.removeView(view) }
+        liteDanmakuView = null
+        liteDanmakuController = null
+        danmakuRenderMode = mode
+        glDanmakuFailed = false
+        // 用新模式重建，并同步设置。
+        setupDanmakuEngine()
+        syncDanmakuSettings()
+        // 重喂最近一次弹幕数据，并把新引擎 seek 到当前播放位置。
+        lastDanmakuData?.let { data ->
+            activeDanmakuController()?.setData(data, lastDanmakuFilterContext, PlaybackStartupTrace.NO_TRACE, 0L)
+        }
+        activeDanmakuController()?.syncPosition(playerPositionMs, forceSeek = true)
         restoreOverlayZOrder()
     }
 
@@ -2846,6 +2881,8 @@ class MyPlayerView @JvmOverloads constructor(
         startupTraceId: String = PlaybackStartupTrace.NO_TRACE,
         startupTraceStartElapsedMs: Long = 0L
     ) {
+        lastDanmakuData = data
+        lastDanmakuFilterContext = filterContext
         setupDanmakuEngine()
         syncDanmakuSettings()
         activeDanmakuController()?.setData(data, filterContext, startupTraceId, startupTraceStartElapsedMs)
