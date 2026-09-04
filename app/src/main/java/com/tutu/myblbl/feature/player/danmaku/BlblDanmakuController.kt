@@ -6,6 +6,7 @@ import com.tutu.myblbl.core.common.ext.isVipColorfulDanmakuAllowed
 import com.tutu.myblbl.core.common.log.AppLog
 import com.tutu.myblbl.feature.player.DanmakuFilterContext
 import com.tutu.myblbl.feature.player.PlaybackStartupTrace
+import com.tutu.myblbl.feature.player.danmaku.clock.DanmakuClockMode
 import com.tutu.myblbl.feature.player.danmaku.common.BiliDanmakuFilterPolicy
 import com.tutu.myblbl.feature.player.danmaku.common.BiliDanmakuStyle
 import com.tutu.myblbl.feature.player.danmaku.common.DanmakuDuplicateMergePolicy
@@ -495,13 +496,20 @@ class BlblDanmakuController(
     }
 
     private fun applyDriftSyncTick() {
+        val hostView = viewProvider() ?: return
+        // P4：CONTINUOUS 模式下时间漂移只由渲染线程内的 ClockSynchronizer 治理（唯一治理者，
+        // 定稿约束 3/7），退役控制器内嵌漂移监督器；LEGACY 保留原行为。
+        if (hostView.currentDanmakuClockMode() == DanmakuClockMode.CONTINUOUS) {
+            consecutiveHardSyncCount = 0
+            return
+        }
         if (!isPlaying) {
             // 暂停/buffering 期时钟冻结，不会产生新漂移；恢复原速等播放继续。
             consecutiveHardSyncCount = 0
-            viewProvider()?.updateDanmakuTimeFactor(1f)
+            hostView.updateDanmakuTimeFactor(1f)
             return
         }
-        val view = viewProvider() ?: return
+        val view = hostView
         val videoPos = playerPositionProvider?.invoke()?.coerceAtLeast(0L) ?: return
         val enginePos = view.currentDanmakuPositionMs()
         // 符号约定：engineLeadMs > 0 = 引擎领先视频，< 0 = 引擎落后。

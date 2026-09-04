@@ -7,6 +7,7 @@ import android.util.AttributeSet
 import android.util.TypedValue
 import android.view.View
 import com.tutu.myblbl.core.common.log.AppLog
+import com.tutu.myblbl.feature.player.danmaku.clock.DanmakuClockMode
 import com.tutu.myblbl.feature.player.danmaku.common.BiliDanmakuStyle
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -226,6 +227,13 @@ class DanmakuView @JvmOverloads constructor(
     override fun syncDanmakuTimerTo(positionMs: Long) {
         player.syncTimerTo(positionMs)
     }
+
+    /** P7：Canvas 后端时钟模式（转发给 player；CONTINUOUS 在主线程 draw 推进）。 */
+    override fun setDanmakuClockMode(mode: DanmakuClockMode) {
+        player.setClockMode(mode)
+    }
+
+    override fun currentDanmakuClockMode(): DanmakuClockMode = player.currentClockMode()
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()

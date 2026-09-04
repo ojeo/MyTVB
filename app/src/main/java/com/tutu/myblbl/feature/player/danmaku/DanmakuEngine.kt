@@ -25,7 +25,8 @@ internal interface DanmakuEngineMainApi {
 
     fun lastDrawCacheMissSkippedCount(): Int
 
-    fun stepTime(positionMs: Long, uiFrameId: Int)
+    /** 写入当前连续媒体时间（纳秒）。内部拆成整数 ms 调度 + 亚毫秒渲染位置。 */
+    fun stepTime(positionNs: Long, uiFrameId: Int)
 
     /** 主线程专用：为合法回退（seek 回看）放行单调高水位。必须与 stepTime 同线程调用。 */
     fun allowClockBackwardTo(positionMs: Long)
@@ -101,7 +102,7 @@ internal interface DanmakuEngineActionApi {
 
     fun updateConfig(newConfig: DanmakuConfig)
 
-    fun stepTime(positionMs: Long, uiFrameId: Int)
+    fun stepTime(positionNs: Long, uiFrameId: Int)
 
     fun currentPositionMs(): Long
 
@@ -231,6 +232,8 @@ internal class DanmakuEngine(
 
     // ---- Time (main writes; action reads) ----
     @Volatile private var currentPositionMs: Long = 0L
+    /** 亚毫秒渲染位置（纳秒）：draw 的 scrollX 用它，消除整数 ms 截断的步进抖动。 */
+    @Volatile private var currentPositionNs: Long = 0L
     @Volatile private var currentUiFrameId: Int = 0
 
     // 时钟单调高水位（主线程 stepTime 维护）：位置回退（平滑时钟硬校准/raw 抖动）时
@@ -240,6 +243,7 @@ internal class DanmakuEngine(
     // 分叉类消失不再可能。合法回退（用户 seek 回看）由 [allowClockBackwardTo] 在主线程放行，
     // 必须与 stepTime 同线程以避免跨线程重置/写入交错把高水位卡在旧位置。
     @Volatile private var monotonicClockMs: Long = 0L
+    @Volatile private var monotonicClockNs: Long = 0L
 
     // ---- Render snapshot (double buffer) ----
     private val snapshots = Array(3) { RenderSnapshot() }
@@ -358,19 +362,27 @@ internal class DanmakuEngine(
     private fun sp(v: Float): Float =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, v, displayMetrics)
 
-    override fun stepTime(positionMs: Long, uiFrameId: Int) {
-        val pos = positionMs.coerceAtLeast(0L)
-        val floor = monotonicClockMs
+    override fun stepTime(positionNs: Long, uiFrameId: Int) {
+        val posNs = positionNs.coerceAtLeast(0L)
+        val posMs = posNs / 1_000_000L
         // 单调钳制：只允许前进。回退（漂移硬校准等）被吸收为"冻结等 raw 追上"，
         // 而不是位置倒跳。合法回退（用户 seek 回看）走 allowClockBackwardTo 放行。
-        val effective = if (pos >= floor) pos else floor
-        monotonicClockMs = effective
-        currentPositionMs = effective
+        val floorMs = monotonicClockMs
+        val effectiveMs = if (posMs >= floorMs) posMs else floorMs
+        monotonicClockMs = effectiveMs
+        currentPositionMs = effectiveMs
+        // 渲染位置：亚毫秒单调钳制（与整数 ms 版本同源），保证 scrollX 永不倒跳。
+        val floorNs = monotonicClockNs
+        val effectiveNs = if (posNs >= floorNs) posNs else floorNs
+        monotonicClockNs = effectiveNs
+        currentPositionNs = effectiveNs
         currentUiFrameId = uiFrameId
     }
 
     override fun allowClockBackwardTo(positionMs: Long) {
-        monotonicClockMs = positionMs.coerceAtLeast(0L)
+        val m = positionMs.coerceAtLeast(0L)
+        monotonicClockMs = m
+        monotonicClockNs = m * 1_000_000L
     }
 
     override fun currentPositionMs(): Long = currentPositionMs
@@ -665,7 +677,9 @@ internal class DanmakuEngine(
         bitmapPaint.alpha = opacityAlpha
         val styleGen = cacheStyleGeneration
         val width = viewportWidth.coerceAtLeast(0)
-        val nowMs = currentPositionMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        // 亚毫秒浮点时间：整数 ms 截断会把 60Hz 每帧 16.67ms 量化成 16/17ms 交替，
+        // 滚动位移周期性摆动（约 ±6% 速度波动，视觉"一顿一顿"）。用 ns 换算保留亚毫秒精度。
+        val nowMs = (currentPositionNs.toDouble() / 1_000_000.0).toFloat()
 
         var cachedDrawn = 0
         var cacheMissSkipped = 0
@@ -741,7 +755,9 @@ internal class DanmakuEngine(
 
     override fun setDanmakus(list: List<Danmaku>) {
         synchronized(actionStateLock) {
-            if (list.isEmpty()) clearAdmissionHistory("setDanmakus-empty")
+            // 空列表仅做整屏清空（清屏语义），保留防重放历史：controller 常以
+            // setDanmakus(empty) → setDanmakus(real) 连续调用完成数据替换，清历史
+            // 会重开最近窗口，导致刚滚过的弹幕再入场一次。
             val newItems =
                 list
                     .sortedBy { it.timeMs }
@@ -1390,13 +1406,10 @@ internal class DanmakuEngine(
         val size = active.size
         var write = 0
         val releaseAt = currentUiFrameId + 1
-        var droppedTimeout = 0
-        var droppedNormal = 0
         for (read in 0 until size) {
             val a = active[read]
             val reason = expireReason(a, width = width, nowMs = nowMs)
             if (reason != null) {
-                if (reason == "cacheWaitTimeout") droppedTimeout++ else droppedNormal++
                 // cacheWaitTimeout = 缓存超时丢弃（弹幕从未可见），是"半路消失"的可疑来源，单独详记。
                 if (reason == "cacheWaitTimeout") {
                     if (AppLog.isEnabled) {
@@ -1411,7 +1424,7 @@ internal class DanmakuEngine(
                     // duration 退场时 x 理应 ≈ -textWidth（刚好完全出屏）。
                     // x 还在屏幕右侧 25% 区域内就到期 = "滚到一半消失"的直接现场：
                     // 要么 startTimeMs 被位置前跳拉大（elapsed 虚增），要么 durationMs 算短了。
-                    val x = scrollX(width = width, nowMs = nowMs, startTimeMs = a.startTimeMs, pxPerMs = a.pxPerMs)
+                    val x = scrollX(width = width, nowMs = nowMs.toFloat(), startTimeMs = a.startTimeMs, pxPerMs = a.pxPerMs)
                     if (x + a.textWidthPx > width * 0.25f && AppLog.isEnabled) {
                         AppLog.w(
                             TAG,
@@ -1432,13 +1445,8 @@ internal class DanmakuEngine(
         }
         if (write < size) {
             active.subList(write, size).clear()
-            if ((droppedTimeout > 0 || droppedNormal > 0) && AppLog.isEnabled) {
-                AppLog.w(
-                    TAG,
-                    "pruneExpired removed=${size - write} timeout=$droppedTimeout normal=$droppedNormal " +
-                        "now=${nowMs}ms remain=${active.size}"
-                )
-            }
+            // 正常滚出屏幕是高频生命周期事件，不在热路径逐帧记日志。异常的
+            // cacheWaitTimeout / EARLY-EXIT 已在上方单独记录，排障信息不会丢失。
         }
     }
 
@@ -1686,7 +1694,7 @@ internal class DanmakuEngine(
                 laneLastScroll[lane] = item
                 return true
             }
-            val tailPrev = scrollX(width = width, nowMs = nowMs, startTimeMs = rear.startTimeMs, pxPerMs = rear.pxPerMs) + rear.textWidthPx
+            val tailPrev = scrollX(width = width, nowMs = nowMs.toFloat(), startTimeMs = rear.startTimeMs, pxPerMs = rear.pxPerMs) + rear.textWidthPx
             if (isScrollLaneAvailable(width.toFloat(), nowMs, rear, tailPrev, pxNew, marginPx)) {
                 activate(
                     item = item,
@@ -1910,15 +1918,15 @@ internal class DanmakuEngine(
         val elapsed = nowMs - item.startTimeMs
         if (elapsed >= item.durationMs) return "duration"
         if (item.kind != DanmakuKind.SCROLL) return null
-        return if (scrollX(width = width, nowMs = nowMs, startTimeMs = item.startTimeMs, pxPerMs = item.pxPerMs) + item.textWidthPx < 0f) {
+        return if (scrollX(width = width, nowMs = nowMs.toFloat(), startTimeMs = item.startTimeMs, pxPerMs = item.pxPerMs) + item.textWidthPx < 0f) {
             "scrolledOut"
         } else {
             null
         }
     }
 
-    private fun scrollX(width: Int, nowMs: Int, startTimeMs: Int, pxPerMs: Float): Float {
-        val elapsed = (nowMs - startTimeMs).coerceAtLeast(0)
+    private fun scrollX(width: Int, nowMs: Float, startTimeMs: Int, pxPerMs: Float): Float {
+        val elapsed = (nowMs - startTimeMs).coerceAtLeast(0f)
         return width.toFloat() - elapsed * pxPerMs
     }
 
@@ -2161,8 +2169,8 @@ internal class DanmakuEngine(
          */
         private const val ON_SCREEN_OVERSHOOT = 16
 
-        /** admit 日志采样步长（每 N 条输出 1 条）。 */
-        private const val ADMIT_LOG_SAMPLE = 8
+        /** admit 日志采样步长（每 N 条输出 1 条）；避免诊断模式反过来干扰渲染调度。 */
+        private const val ADMIT_LOG_SAMPLE = 64
         private const val ADMISSION_HISTORY_PRUNE_INTERVAL_MS = 1_000
         private const val DRAW_MISS_LOG_INTERVAL_MS = 500L
 

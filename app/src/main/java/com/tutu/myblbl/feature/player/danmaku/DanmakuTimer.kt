@@ -5,13 +5,19 @@ import kotlin.math.abs
 import kotlin.math.min
 
 /**
- * AkDanmaku-style timer:
+ * AkDanmaku-style timer（LEGACY 兼容层，P8 标记废弃）:
  * - Uses System.nanoTime() for smooth advancement.
  * - Prioritizes a monotonic local clock while playing for stable motion.
  * - Re-anchors hard only on explicit playback events (seek).
  * - Ordinary lag in Player.currentPosition never pulls the local clock backwards.
  * - Only a forward media-clock gap is corrected, with a bounded extra rate.
+ *
+ * 已被 `clock/ContinuousMediaClock`（Anchor + 外推纯函数）+ `ClockSynchronizer`
+ * （唯一治理者）取代。当前仅作为 `DanmakuClockMode.LEGACY` 的兼容/回退实现保留，
+ * 生产默认已切 `CONTINUOUS`（见 docs/弹幕双时钟与连续媒体时钟实现方案.md §0.7/P8）。
+ * 真机验证（P5/P6）通过后删除本类与其调用分支。
  */
+@Deprecated("LEGACY 兼容层：由 ContinuousMediaClock + ClockSynchronizer 取代，验证后退役")
 internal class DanmakuTimer {
     @Volatile
     private var lastFrameNanos: Long = 0L

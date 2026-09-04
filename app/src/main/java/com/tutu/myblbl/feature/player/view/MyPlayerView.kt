@@ -236,6 +236,17 @@ class MyPlayerView @JvmOverloads constructor(
     var danmakuRenderMode: DanmakuRenderMode = DanmakuRenderMode.GL
     @Volatile private var glDanmakuFailed = false
 
+    // 弹幕时钟模式（P1 A/B 实验 → P7/P8 生产默认）。
+    // P8 默认 = CONTINUOUS（双后端 GPU/Canvas 均已接入 ContinuousMediaClock；见 docs 方案 §0.7/P8）。
+    // LEGACY 保留为回退档（DanmakuTimer 已标记废弃，真机验证通过后删除）。
+    var danmakuClockMode: com.tutu.myblbl.feature.player.danmaku.clock.DanmakuClockMode =
+        com.tutu.myblbl.feature.player.danmaku.clock.DanmakuClockMode.CONTINUOUS
+        set(value) {
+            field = value
+            // 运行时切换：立即下发到当前宿主；后续新创建的宿主在 setupDanmakuEngine 时同步。
+            liteDanmakuView?.setDanmakuClockMode(value)
+        }
+
     /** 切换弹幕渲染后端（GPU / Canvas），下次创建弹幕引擎时生效。 */
     fun switchDanmakuRenderMode(mode: DanmakuRenderMode) {
         if (danmakuRenderMode == mode) return
@@ -2818,6 +2829,8 @@ class MyPlayerView @JvmOverloads constructor(
         renderView.isFocusable = false
         dmkMaskHost?.addView(renderView) ?: addView(renderView)
         liteDanmakuView = view
+        // 应用持久化的时钟模式（P1 A/B；GPU 支持 CONTINUOUS，Canvas no-op）。
+        view.setDanmakuClockMode(danmakuClockMode)
         liteDanmakuController = BlblDanmakuController(context) { liteDanmakuView }.also {
             it.playerPositionProvider = { playerPositionMs }
         }
@@ -2842,6 +2855,8 @@ class MyPlayerView @JvmOverloads constructor(
         danmakuRenderMode = mode
         glDanmakuFailed = false
         // 用新模式重建，并同步设置。
+        // P7 起 Canvas 后端同样支持 CONTINUOUS 时钟（DanmakuPlayer.advanceContinuousClock），
+        // 不再因切换后端而降级 LEGACY——降级会让连续媒体时钟特性静默失效。
         setupDanmakuEngine()
         syncDanmakuSettings()
         // 重喂最近一次弹幕数据，并把新引擎 seek 到当前播放位置。
@@ -2855,6 +2870,7 @@ class MyPlayerView @JvmOverloads constructor(
     private fun fallbackToCanvasDanmaku(failedView: GlDanmakuView) {
         if (liteDanmakuView !== failedView) return
         glDanmakuFailed = true
+        // 仅回退渲染后端，不动时钟模式：Canvas 后端自 P7 起同样支持 CONTINUOUS。
         val failedRenderView = failedView.renderView
         val parent = failedRenderView.parent as? ViewGroup
         val childIndex = parent?.indexOfChild(failedRenderView) ?: -1

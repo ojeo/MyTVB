@@ -143,7 +143,7 @@ internal class GlInstancedRenderer {
         GLES30.glGenBuffers(1, ids, 0)
         instanceVbo = ids[0]
         GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, instanceVbo)
-        GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, MAX_INSTANCES * STRIDE_BYTES, null, GLES30.GL_DYNAMIC_DRAW)
+        GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, MAX_INSTANCES * STRIDE_BYTES, null, GLES30.GL_STREAM_DRAW)
 
         // VAO：固定 attrib 0（quad），instanced attrib 1~3
         GLES30.glGenVertexArrays(1, ids, 0)
@@ -245,6 +245,16 @@ internal class GlInstancedRenderer {
 
         GLES30.glBindVertexArray(vao)
         GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, instanceVbo)
+        // 为本帧换一块新 backing storage，避免旧 Mali 驱动等待上一帧仍在读取的 VBO。
+        // 同一帧的不同 Atlas 页也写到互不重叠的区间；旧实现每页都覆盖 offset=0，
+        // glBufferSubData 可能在每个 draw 后发生隐式同步，页数增加时尤其容易错过 vsync。
+        GLES30.glBufferData(
+            GLES30.GL_ARRAY_BUFFER,
+            MAX_INSTANCES * STRIDE_BYTES,
+            null,
+            GLES30.GL_STREAM_DRAW,
+        )
+        var writeOffsetBytes = 0
         for (i in textureIds.indices) {
             val count = pageCounts[i]
             if (count <= 0) continue
@@ -252,13 +262,20 @@ internal class GlInstancedRenderer {
             if (texId == 0) continue
             val pageBuffer = pageInstanceBuffers[i]
             pageBuffer.flip()
-            GLES30.glBufferSubData(GLES30.GL_ARRAY_BUFFER, 0, pageBuffer.remaining() * 4, pageBuffer)
+            val uploadBytes = pageBuffer.remaining() * 4
+            GLES30.glBufferSubData(
+                GLES30.GL_ARRAY_BUFFER,
+                writeOffsetBytes,
+                uploadBytes,
+                pageBuffer,
+            )
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, texId)
-            GLES30.glVertexAttribPointer(LOC_RECT, 4, GLES30.GL_FLOAT, false, STRIDE_BYTES, 0)
-            GLES30.glVertexAttribPointer(LOC_UV, 4, GLES30.GL_FLOAT, false, STRIDE_BYTES, 16)
-            GLES30.glVertexAttribPointer(LOC_COLOR, 4, GLES30.GL_FLOAT, false, STRIDE_BYTES, 32)
+            GLES30.glVertexAttribPointer(LOC_RECT, 4, GLES30.GL_FLOAT, false, STRIDE_BYTES, writeOffsetBytes)
+            GLES30.glVertexAttribPointer(LOC_UV, 4, GLES30.GL_FLOAT, false, STRIDE_BYTES, writeOffsetBytes + 16)
+            GLES30.glVertexAttribPointer(LOC_COLOR, 4, GLES30.GL_FLOAT, false, STRIDE_BYTES, writeOffsetBytes + 32)
             GLES30.glDrawArraysInstanced(GLES30.GL_TRIANGLE_STRIP, 0, 4, count)
             lastDrawCallCount++
+            writeOffsetBytes += uploadBytes
         }
         GLES30.glBindVertexArray(0)
         GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0)

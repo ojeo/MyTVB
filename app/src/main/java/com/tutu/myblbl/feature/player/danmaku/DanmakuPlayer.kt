@@ -9,6 +9,9 @@ import android.os.SystemClock
 import android.view.Choreographer
 import com.tutu.myblbl.core.common.log.AppLog
 import com.tutu.myblbl.feature.player.danmaku.Danmaku
+import com.tutu.myblbl.feature.player.danmaku.clock.DanmakuClockMode
+import com.tutu.myblbl.feature.player.danmaku.clock.MediaClockSample
+import com.tutu.myblbl.feature.player.danmaku.clock.RenderClockDriver
 import com.tutu.myblbl.feature.player.danmaku.model.RenderSnapshotStats
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -45,6 +48,22 @@ internal class DanmakuPlayer(
         private const val MSG_OP_CONFIG = 3202
         private const val MSG_OP_CACHE_RESULT = 3203
         private const val MSG_OP_RELEASE = 3999
+
+        /**
+         * Action 线程 vsync 帧时间可复用的最大陈旧度（ns）。
+         *
+         * 超过该值说明 Action 线程已停止 Choreographer 回调（active/pending 全空的
+         * idle 休眠期），此时必须回退 `System.nanoTime()`：继续拿陈旧帧时间当
+         * presentationTime 会让 `mediaTimeAt()` 恒定 → 连续时钟冻结，且
+         * `RenderClockDriver` 的 400ms 同步节拍因 frameTime 不推进而永不触发，
+         * ClockSynchronizer 再也无法下发 Reanchor 解冻。
+         *
+         * 真机现场（2026-09-03 Beelink GT1 / 60Hz）：弹幕时钟定格在 76363ms，
+         * 而 raw 已推进到 124966ms（偏差 -48.6s），同时 idle 空转 ~59 次/秒。
+         *
+         * 50ms ≈ 3 帧：正常渲染路径下主线程 draw 读到的 age < 16ms，不受影响。
+         */
+        private const val VSYNC_STALE_THRESHOLD_NS = 50_000_000L
     }
 
     private val cacheManager =
@@ -66,6 +85,24 @@ internal class DanmakuPlayer(
 
     private val seekSerial = AtomicInteger(0)
     private val uiFrameId = AtomicInteger(0)
+
+    // ---- NEW_CLOCK（P7：Canvas 接入 CONTINUOUS A/B）----
+    // LEGACY = 旧 DanmakuTimer 增量积分 + 追赶（默认，行为不变）；
+    // CONTINUOUS = ContinuousMediaClock + ClockSynchronizer（唯一治理者），主线程 draw 推进。
+    @Volatile
+    private var clockMode: DanmakuClockMode = DanmakuClockMode.LEGACY
+
+    /** 连续媒体时钟驱动桥：主线程 draw 内串行推进（advance 与 seek 同主线程）。 */
+    private val clockDriver = RenderClockDriver()
+
+    /** 待执行 Seek（ms）：主线程 notifySeek 写入，下一次 draw 消费后复位 -1。 */
+    private var pendingSeekPositionMs: Long = -1L
+
+    /** Action 线程 Choreographer 最近一次 vsync 帧时间（主线程 draw 作为 presentationTime 读取）。 */
+    @Volatile
+    private var lastActionVsyncNs: Long = 0L
+
+    private var clockSampleSequence = 0L
 
     private val perfSampleRequested = AtomicBoolean(false)
     private val idleWakeDrawRequested = AtomicBoolean(false)
@@ -120,6 +157,15 @@ internal class DanmakuPlayer(
     // Accessed only on the action thread. The main thread is notified through idleWakeDrawRequested.
     private var frameLoopIdle: Boolean = false
     private var scheduledIdleWakeAtUptimeMs: Long = 0L
+
+    /**
+     * 连续「贴着最小间隔唤醒」的档位。
+     *
+     * 正常情况下唤醒后时钟会推进、目标时刻随即到达并退出 idle；若连续多次唤醒
+     * 间隔仍是最小值，说明媒体时间没有前进（时钟冻结/停摆），此时逐级指数退避，
+     * 避免退化成 8ms 级（≈125Hz）空转风暴。
+     */
+    private var idleShortWakeStreak: Int = 0
 
     internal fun debugSnapshot(): RenderSnapshotStats = engineMain.renderSnapshotStats()
 
@@ -242,6 +288,8 @@ internal class DanmakuPlayer(
         if (released) return
         released = true
         started = false
+        clockDriver.reset()
+        pendingSeekPositionMs = -1L
         if (AppLog.isEnabled) {
             AppLog.w(DIAG_TAG, "player RELEASE (engine permanently stopped; view detach/replay requires new instance)")
         }
@@ -285,16 +333,35 @@ internal class DanmakuPlayer(
         actionHandler.obtainMessage(MSG_OP_TRIM_RANGE, TrimRangePayload(minTimeMs, maxTimeMs)).sendToTarget()
     }
 
+    fun setClockMode(mode: DanmakuClockMode) {
+        if (clockMode == mode) return
+        clockMode = mode
+        // 切换模式时重置新时钟驱动，避免与 LEGACY 增量状态交叉污染。
+        clockDriver.reset()
+        pendingSeekPositionMs = -1L
+        if (AppLog.isEnabled) {
+            AppLog.i(DIAG_TAG, "clock mode -> $mode")
+        }
+    }
+
+    fun currentClockMode(): DanmakuClockMode = clockMode
+
     fun seekTo(positionMs: Long) {
         // 主线程放行单调高水位（seek 回看是合法回退）。必须与 stepTime 同线程，
         // 否则 action 线程重置与主线程写入交错可能把高水位卡在旧位置。
         engineMain.allowClockBackwardTo(positionMs.coerceAtLeast(0L))
         seekSerial.incrementAndGet()
+        if (clockMode == DanmakuClockMode.CONTINUOUS) {
+            // NEW_CLOCK：seek 由下一次 draw 以当前 presentationTime 硬锚（场景重建仍走 MSG_OP_SEEK）。
+            pendingSeekPositionMs = positionMs.coerceAtLeast(0L)
+        }
         actionHandler.obtainMessage(MSG_OP_SEEK, positionMs).sendToTarget()
     }
 
     /** 漂移监督器软同步：微调平滑时钟推进速率（±5% 量级），不触发任何重锚。 */
     fun updateTimeFactor(factor: Float) {
+        // NEW_CLOCK：时间漂移只由 ClockSynchronizer 治理，软同步因子退役。
+        if (clockMode == DanmakuClockMode.CONTINUOUS) return
         timer.softSyncFactor = factor.toDouble()
     }
 
@@ -303,6 +370,8 @@ internal class DanmakuPlayer(
 
     /** 漂移监督器硬同步：轻量移动平滑时钟，不做场景重建（重建由单调钳制吸收回退）。 */
     fun syncTimerTo(positionMs: Long) {
+        // NEW_CLOCK：不允许轻量回拨（定稿约束 3/4），由 ClockSynchronizer 冻结/减速吸收。
+        if (clockMode == DanmakuClockMode.CONTINUOUS) return
         timer.syncTo(positionMs)
     }
 
@@ -347,17 +416,25 @@ internal class DanmakuPlayer(
 
         val frameId = uiFrameId.incrementAndGet()
         engineMain.drainReleasedBitmaps(frameId)
-        val nowNanos = System.nanoTime()
-        val smoothPos =
-            timer.step(
-                nowNanos = nowNanos,
-                rawPositionMs = rawPositionMs,
-                isPlaying = isPlaying,
-                playbackSpeed = playbackSpeed,
-                seekSerial = seekSerial.get(),
-            )
+        // CONTINUOUS 输出纳秒；LEGACY 输出整数 ms，这里统一 *1e6 转 ns 对齐 stepTime。
+        val smoothPosNs: Long =
+            if (clockMode == DanmakuClockMode.CONTINUOUS) {
+                advanceContinuousClock(
+                    rawPositionMs = rawPositionMs,
+                    isPlaying = isPlaying,
+                    playbackSpeed = playbackSpeed,
+                )
+            } else {
+                timer.step(
+                    nowNanos = System.nanoTime(),
+                    rawPositionMs = rawPositionMs,
+                    isPlaying = isPlaying,
+                    playbackSpeed = playbackSpeed,
+                    seekSerial = seekSerial.get(),
+                ) * 1_000_000L
+            }
 
-        engineMain.stepTime(positionMs = smoothPos, uiFrameId = frameId)
+        engineMain.stepTime(positionNs = smoothPosNs, uiFrameId = frameId)
         if (idleWakeDrawRequested.compareAndSet(true, false)) {
             actionHandler.sendEmptyMessage(MSG_RESUME_FROM_IDLE)
         }
@@ -368,6 +445,54 @@ internal class DanmakuPlayer(
         } finally {
             engineMain.releaseRenderSnapshot(snapshot)
         }
+    }
+
+    /**
+     * NEW_CLOCK（CONTINUOUS）单帧时钟推进（P7，Canvas 版）。
+     *
+     * 设计对齐方案 §29/§30：
+     * - MainThread onDraw 现算 Motion（不提前在 Action 线程算 x，避免 1-vsync 相位滞后）；
+     * - presentationTime 取最近一次 Action 线程 vsync 帧时间（同一 monotonic 域），
+     *   无新 vsync 时回退 System.nanoTime()；
+     * - Provider rawPosition（主线程已读）→ MediaClockSample（position 与采样时刻成对）；
+     * - RenderClockDriver 处理播放边沿 / 周期同步（400ms）/ Seek 硬锚。
+     *
+     * 仅在主线程 draw 内调用（与 seekTo/setClockMode 同线程串行，无并发）。
+     */
+    private fun advanceContinuousClock(
+        rawPositionMs: Long,
+        isPlaying: Boolean,
+        playbackSpeed: Float,
+    ): Long {
+        val pendingSeekMs = pendingSeekPositionMs
+        if (pendingSeekMs >= 0L) pendingSeekPositionMs = -1L
+        // idle 休眠期 Action 线程不再回调 doFrame，lastActionVsyncNs 就此停更；
+        // 继续复用它会让 mediaTimeAt() 恒定（连续时钟冻结），且 RenderClockDriver
+        // 的 400ms 同步节拍因 frameTime 不推进而永不触发 → 同步器再也无法解冻。
+        // 陈旧超过阈值即回退 System.nanoTime()（与 Choreographer 同 monotonic 域）。
+        val nowNs = System.nanoTime()
+        val lastVsyncNs = lastActionVsyncNs
+        val vsyncAgeNs = nowNs - lastVsyncNs
+        val presentationNs =
+            if (lastVsyncNs > 0L && vsyncAgeNs >= 0L && vsyncAgeNs < VSYNC_STALE_THRESHOLD_NS) {
+                lastVsyncNs
+            } else {
+                nowNs
+            }
+        clockSampleSequence++
+        val sample = MediaClockSample(
+            mediaPositionNs = rawPositionMs.coerceAtLeast(0L) * 1_000_000L,
+            sampledAtRealtimeNs = presentationNs,
+            playbackSpeed = playbackSpeed.takeIf { it.isFinite() && it > 0f }?.toDouble() ?: 1.0,
+            isPlaying = isPlaying,
+            playbackState = 0,
+            sequence = clockSampleSequence,
+        )
+        return clockDriver.advance(
+            frameTimeNs = presentationNs,
+            sample = sample,
+            pendingSeekMediaNs = if (pendingSeekMs >= 0L) pendingSeekMs * 1_000_000L else null,
+        )
     }
 
     private fun postFrameCallback() {
@@ -387,6 +512,8 @@ internal class DanmakuPlayer(
             when (msg.what) {
                 MSG_FRAME_UPDATE -> {
                     if (released || !started) return
+                    // 记录本帧 vsync 时间（Action 线程写 @Volatile，主线程 draw 读取，无锁安全）。
+                    (msg.obj as? Long)?.takeIf { it > 0L }?.let { lastActionVsyncNs = it }
                     runFrameUpdate()
                 }
 
@@ -521,7 +648,7 @@ internal class DanmakuPlayer(
         private fun renderOnceIfPaused(positionMs: Long? = null) {
             if (released || started) return
             val pos = positionMs ?: engineAction.currentPositionMs()
-            engineAction.stepTime(positionMs = pos, uiFrameId = uiFrameId.get())
+            engineAction.stepTime(positionNs = pos * 1_000_000L, uiFrameId = uiFrameId.get())
             val sampleAct = perfSampleRequested.getAndSet(false)
             val shouldMeasure = debugEnabled || sampleAct
             val t0 = if (shouldMeasure) System.nanoTime() else 0L
@@ -568,15 +695,26 @@ internal class DanmakuPlayer(
                 val schedule = engineAction.frameSchedule()
                 if (schedule.animate) {
                     frameLoopIdle = false
+                    idleShortWakeStreak = 0
                     postFrameCallback()
                 } else {
                     frameLoopIdle = true
                     idleCycleCount.incrementAndGet()
+                    // 上一次唤醒同样贴着最小间隔 → 媒体时间大概率没有前进，
+                    // 逐级退避把最坏唤醒频率从 ~125Hz 压到 ≤2Hz。
+                    val previousDelayMs = lastIdleWakeDelayMs
+                    idleShortWakeStreak =
+                        if (previousDelayMs > 0L && previousDelayMs <= MIN_IDLE_WAKE_MS) {
+                            (idleShortWakeStreak + 1).coerceAtMost(MAX_IDLE_SHORT_WAKE_SHIFT)
+                        } else {
+                            0
+                        }
                     schedule.nextWakeAtMs?.let { nextWakeAtMs ->
                         val delayMs = resolveDanmakuIdleWakeDelayMs(
                             nextWakeAtMs = nextWakeAtMs,
                             currentPositionMs = engineAction.currentPositionMs(),
                             playbackSpeed = latestPlaybackSpeed,
+                            shortWakeStreak = idleShortWakeStreak,
                         )
                         lastIdleWakeDelayMs = delayMs
                         scheduledIdleWakeAtUptimeMs = SystemClock.uptimeMillis() + delayMs
@@ -605,7 +743,10 @@ internal class DanmakuPlayer(
     ) : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
             handler.removeMessages(MSG_FRAME_UPDATE)
-            handler.sendEmptyMessage(MSG_FRAME_UPDATE)
+            // 携带 vsync 帧时间：Action 线程更新 lastActionVsyncNs，主线程 draw 用作 presentationTime。
+            val msg = handler.obtainMessage(MSG_FRAME_UPDATE)
+            msg.obj = frameTimeNanos
+            handler.sendMessage(msg)
         }
     }
 
@@ -634,18 +775,37 @@ internal class DanmakuPlayer(
     )
 }
 
+/** idle 唤醒最小间隔（ms）：低于此值说明目标时刻近在眼前，退避才有意义。 */
+internal const val MIN_IDLE_WAKE_MS = 8L
+
+/**
+ * 连续短唤醒退避的最大档位：8ms × 2^6 = 512ms，再叠加 [resolveDanmakuIdleWakeDelayMs]
+ * 的 maxRecheckMs 上限 → 最坏情况退避到 1s 一次。
+ */
+private const val MAX_IDLE_SHORT_WAKE_SHIFT = 6
+
 /**
  * Keep sparse timelines asleep while still rechecking at most once per second
  * for playback-rate changes that were not accompanied by a View invalidation.
+ *
+ * [shortWakeStreak]：连续「贴着最小间隔唤醒」的档位。正常时钟下唤醒后媒体时间随即
+ * 越过目标并退出 idle；若目标时刻始终差几毫秒，说明媒体时间没有前进（时钟冻结），
+ * 此时按 2^n 指数退避，避免退化成 8ms 级空转风暴。
  */
 internal fun resolveDanmakuIdleWakeDelayMs(
     nextWakeAtMs: Int,
     currentPositionMs: Long,
     playbackSpeed: Float,
     maxRecheckMs: Long = 1_000L,
+    minWakeMs: Long = MIN_IDLE_WAKE_MS,
+    shortWakeStreak: Int = 0,
 ): Long {
     val mediaDelayMs = (nextWakeAtMs.toLong() - currentPositionMs).coerceAtLeast(0L)
     val speed = playbackSpeed.takeIf { it.isFinite() && it > 0f }?.toDouble() ?: 1.0
     val wallDelayMs = kotlin.math.ceil(mediaDelayMs.toDouble() / speed).toLong()
-    return wallDelayMs.coerceIn(1L, maxRecheckMs.coerceAtLeast(1L))
+    val cappedMax = maxRecheckMs.coerceAtLeast(minWakeMs)
+    val capped = wallDelayMs.coerceIn(minWakeMs, cappedMax)
+    if (capped > minWakeMs || shortWakeStreak <= 0) return capped
+    val factor = 1L shl shortWakeStreak.coerceAtMost(MAX_IDLE_SHORT_WAKE_SHIFT)
+    return (minWakeMs * factor).coerceAtMost(cappedMax)
 }

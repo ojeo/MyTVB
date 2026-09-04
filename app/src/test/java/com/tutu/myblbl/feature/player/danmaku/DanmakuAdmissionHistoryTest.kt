@@ -132,7 +132,7 @@ class DanmakuAdmissionHistoryTest {
     @Test
     fun idleWakeIsNeverZeroAndInvalidSpeedFallsBackToNormalSpeed() {
         assertEquals(
-            1L,
+            MIN_IDLE_WAKE_MS,
             resolveDanmakuIdleWakeDelayMs(
                 nextWakeAtMs = 1_000,
                 currentPositionMs = 1_000L,
@@ -147,6 +147,33 @@ class DanmakuAdmissionHistoryTest {
                 playbackSpeed = Float.NaN,
             ),
         )
+    }
+
+    @Test
+    fun idleWakeBacksOffExponentiallyWhenTargetKeepsSlipping() {
+        // 目标时刻贴着当前位置：无 streak 时取最小间隔
+        assertEquals(
+            MIN_IDLE_WAKE_MS,
+            resolveDanmakuIdleWakeDelayMs(1_000, 1_000L, 1f, shortWakeStreak = 0),
+        )
+        // 连续短唤醒（时钟没推进的典型症状）：8 → 16 → 32 逐级退避
+        assertEquals(16L, resolveDanmakuIdleWakeDelayMs(1_000, 1_000L, 1f, shortWakeStreak = 1))
+        assertEquals(32L, resolveDanmakuIdleWakeDelayMs(1_000, 1_000L, 1f, shortWakeStreak = 2))
+        // 退避封顶后不再增长，且不超过 maxRecheckMs
+        assertEquals(512L, resolveDanmakuIdleWakeDelayMs(1_000, 1_000L, 1f, shortWakeStreak = 6))
+        assertEquals(512L, resolveDanmakuIdleWakeDelayMs(1_000, 1_000L, 1f, shortWakeStreak = 10))
+        assertEquals(
+            100L,
+            resolveDanmakuIdleWakeDelayMs(
+                nextWakeAtMs = 1_000,
+                currentPositionMs = 1_000L,
+                playbackSpeed = 1f,
+                maxRecheckMs = 100L,
+                shortWakeStreak = 6,
+            ),
+        )
+        // 目标时刻本就较远：退避不介入，避免拖慢稀疏弹幕的正常入场
+        assertEquals(500L, resolveDanmakuIdleWakeDelayMs(1_500, 1_000L, 1f, shortWakeStreak = 3))
     }
 
     private fun danmaku(timeMs: Int, dmid: Long?): Danmaku =

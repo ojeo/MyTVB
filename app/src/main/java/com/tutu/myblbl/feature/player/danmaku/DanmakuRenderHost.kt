@@ -1,6 +1,7 @@
 package com.tutu.myblbl.feature.player.danmaku
 
 import android.view.View
+import com.tutu.myblbl.feature.player.danmaku.clock.DanmakuClockMode
 
 /**
  * 弹幕渲染宿主抽象：Canvas 引擎（[DanmakuView]）与 GPU 引擎（render.GlDanmakuView）
@@ -16,6 +17,21 @@ interface DanmakuRenderHost {
     fun setRenderVisible(visible: Boolean) {
         renderView.visibility = if (visible) View.VISIBLE else View.GONE
     }
+
+    /**
+     * 切换时钟模式（A/B 实验，P1）。
+     * 默认空实现：Canvas 后端暂不支持 NEW_CLOCK（P7 接入），保持 LEGACY 行为；
+     * GPU 后端覆盖为 LEGACY/CONTINUOUS 可切换。
+     */
+    fun setDanmakuClockMode(mode: DanmakuClockMode) {
+        // Canvas：no-op，保持 DanmakuTimer LEGACY 路径。
+    }
+
+    /**
+     * 当前生效的时钟模式。默认 [DanmakuClockMode.LEGACY]；
+     * 控制器据此决定是否退役自身漂移监督器（CONTINUOUS 下治理权在 ClockSynchronizer，P4）。
+     */
+    fun currentDanmakuClockMode(): DanmakuClockMode = DanmakuClockMode.LEGACY
 
     fun setPositionProvider(provider: () -> Long)
 

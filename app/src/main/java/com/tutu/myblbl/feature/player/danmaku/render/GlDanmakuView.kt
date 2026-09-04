@@ -1,6 +1,7 @@
 package com.tutu.myblbl.feature.player.danmaku.render
 
 import android.content.Context
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -15,6 +16,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.os.Message
+import android.os.Process
 import android.os.SystemClock
 import android.util.AttributeSet
 import android.util.TypedValue
@@ -34,12 +36,17 @@ import com.tutu.myblbl.feature.player.danmaku.DanmakuFontWeight
 import com.tutu.myblbl.feature.player.danmaku.DanmakuLaneDensity
 import com.tutu.myblbl.feature.player.danmaku.DanmakuRenderHost
 import com.tutu.myblbl.feature.player.danmaku.DanmakuTimer
+import com.tutu.myblbl.feature.player.danmaku.clock.DanmakuClockMode
+import com.tutu.myblbl.feature.player.danmaku.clock.MediaClockSample
+import com.tutu.myblbl.feature.player.danmaku.clock.PresentationTimestampResolver
+import com.tutu.myblbl.feature.player.danmaku.clock.RenderClockDriver
 import com.tutu.myblbl.feature.player.danmaku.common.BiliDanmakuStyle
 import com.tutu.myblbl.feature.player.danmaku.model.DanmakuKind
 import com.tutu.myblbl.feature.player.view.DanmakuMaskHostLayout
 import kotlin.math.roundToInt
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * GPU 弹幕视图：SurfaceView + 独立 RenderThread + GLES3 Instanced 渲染。
@@ -80,20 +87,19 @@ class GlDanmakuView @JvmOverloads constructor(
 
         private const val MSG_INIT_EGL = 3301
         private const val MSG_RELEASE_EGL = 3302
-        private const val MSG_FRAME = 3303
 
         private const val DANMAKU_FONT_BORDER_DEFAULT = 0
 
         /** 渲染性能采样日志间隔（ms）。 */
         private const val PERF_LOG_INTERVAL_MS = 3_000L
         private const val PROVIDER_SAMPLE_INTERVAL_MS = 100L
-        private const val TARGET_FRAME_NS = 16_666_667L
+        private const val VSYNC_GAP_THRESHOLD_NS = 25_000_000L
 
         // ---- Debug Overlay ----
         private const val DIAG_RING_CAPACITY = 600
         private const val DIAG_UPDATE_INTERVAL_MS = 500L
         private const val DIAG_BG_COLOR = 0xCC000000.toInt()
-        private const val DIAG_LINE_COUNT = 8
+        private const val DIAG_LINE_COUNT = 10
         private const val MASK_SAMPLE_COLUMNS = 18
         private const val MASK_SAMPLE_ROWS = 10
         private const val MASK_WARNING_INTERVAL_MS = 3_000L
@@ -110,19 +116,35 @@ class GlDanmakuView @JvmOverloads constructor(
      * Media3 providers are main-thread confined. The GL thread consumes this immutable sample
      * and extrapolates position from elapsedRealtime, so a busy UI thread cannot quantize GL
      * motion to the main window's lower frame rate.
+     *
+     * P3：采样结构直接演进为 [MediaClockSample]——mediaPositionNs 与 sampledAtRealtimeNs
+     * 成对绑定，禁止拆开使用（定稿约束 2）。LEGACY 分支所需字段由 sample 派生，行为不变。
      */
     private data class ProviderSnapshot(
-        val positionMs: Long,
-        val sampledAtRealtimeNs: Long,
-        val isPlaying: Boolean,
+        val sample: MediaClockSample,
         val playWhenReady: Boolean,
-        val speed: Float,
         val config: DanmakuConfig,
-    )
+    ) {
+        val positionMs: Long get() = sample.mediaPositionNs / 1_000_000L
+        val isPlaying: Boolean get() = sample.isPlaying
+        val speed: Float get() = sample.playbackSpeed.toFloat()
+        val sampledAtRealtimeNs: Long get() = sample.sampledAtRealtimeNs
+        val sequence: Long get() = sample.sequence
+    }
 
     @Volatile
-    private var providerSnapshot =
-        ProviderSnapshot(0L, SystemClock.elapsedRealtimeNanos(), false, false, 1f, defaultConfig())
+    private var providerSnapshot = ProviderSnapshot(
+        sample = MediaClockSample(
+            mediaPositionNs = 0L,
+            sampledAtRealtimeNs = SystemClock.elapsedRealtimeNanos(),
+            playbackSpeed = 1.0,
+            isPlaying = false,
+            playbackState = 0,
+            sequence = 0L,
+        ),
+        playWhenReady = false,
+        config = defaultConfig(),
+    )
     private val mainHandler = Handler(Looper.getMainLooper())
     private var providerSamplerRunning = false
     private val providerSampler =
@@ -141,11 +163,63 @@ class GlDanmakuView @JvmOverloads constructor(
     private val seekSerial = AtomicInteger(0)
     private val uiFrameId = AtomicInteger(0)
 
+    // ---- NEW_CLOCK 实验（P1：GPU A/B）----
+    // LEGACY = 旧 DanmakuTimer 增量积分 + 追赶（默认，行为不变）；
+    // CONTINUOUS = ContinuousMediaClock（Anchor + 外推纯函数）+ ClockSynchronizer 唯一治理者。
+    @Volatile
+    private var clockMode: DanmakuClockMode = DanmakuClockMode.LEGACY
+
+    /** 连续媒体时钟驱动桥：仅 RenderThread 访问（advance 与事件同线程串行）。 */
+    private val clockDriver = RenderClockDriver()
+
+    /** 待执行的 Seek（ms）：主线程 notifySeek 写入，RenderThread 消费后复位 -1。 */
+    private val pendingSeekPositionMs = AtomicLong(-1L)
+
+    /**
+     * API 33+ FrameTimeline 的期望呈现时刻（ns）；≤0 表示当前帧未提供（P2 阶段恒为 0，
+     * presentationTimeNs = frameTimeNs）。后续接入 VsyncCallback 后由 RenderThread 写入，
+     * `PresentationTimestampResolver` 统一完成「期望时刻优先 / legacy fallback」决策。
+     */
+    @Volatile
+    private var expectedPresentationTimeNs: Long = 0L
+
+    /**
+     * 切换时钟模式（A/B 实验开关）。
+     * 切到 CONTINUOUS 时重置驱动状态，避免与 LEGACY 增量状态交叉污染。
+     */
+    override fun setDanmakuClockMode(mode: DanmakuClockMode) {
+        if (clockMode == mode) return
+        clockMode = mode
+        renderHandler.post {
+            clockDriver.reset()
+            pendingSeekPositionMs.set(-1L)
+        }
+        requestRenderFrame()
+        if (AppLog.isEnabled) {
+            AppLog.i(TAG, "clock mode -> $mode")
+        }
+    }
+
+    override fun currentDanmakuClockMode(): DanmakuClockMode = clockMode
+
     // ---- 线程 ----
     private val actionThread = HandlerThread("Danmaku-GL-Action").apply { start() }
     private val actionHandler = ActionHandler(actionThread.looper)
-    private val renderThread = HandlerThread("Danmaku-GL-Render").apply { start() }
+    // 独立 Surface 的 60Hz 提交必须及时拿到 CPU；默认优先级在旧 TV SoC 上会被
+    // Action/Cache/解码任务挤掉 Choreographer 回调。DISPLAY 只提升渲染线程，避免
+    // URGENT_DISPLAY 抢占视频解码。
+    private val renderThread =
+        HandlerThread("Danmaku-GL-Render", Process.THREAD_PRIORITY_DISPLAY).apply { start() }
     private val renderHandler = RenderHandler(renderThread.looper)
+
+    // 部分电视盒子没有声明 leanback / television feature，但配置仍是 notouch+dpad；
+    // 两种信号都识别，供透明 Surface 的低带宽渲染策略使用。
+    private val isTvLikeDevice =
+        (resources.configuration.uiMode and Configuration.UI_MODE_TYPE_MASK) ==
+            Configuration.UI_MODE_TYPE_TELEVISION ||
+            (resources.configuration.touchscreen == Configuration.TOUCHSCREEN_NOTOUCH &&
+                resources.configuration.navigation == Configuration.NAVIGATION_DPAD)
+    private val targetRenderFps = 60
 
     // ---- GL 状态（RenderThread 独占）----
     private var egl: GlEglHelper? = null
@@ -167,11 +241,10 @@ class GlDanmakuView @JvmOverloads constructor(
     // GL 投影用完整逻辑视口，SurfaceFlinger 又把整个 buffer 拉伸回全屏矩形，只有 buffer
     // 与逻辑视口等高，横纵向解析度才都等于 renderScale（早期 buffer 只覆盖"内容 band"，
     // 纵向会被额外降采样 → 横清竖糊，已改回全屏 buffer）。
-    // renderScale = 1.0 为原生分辨率；调低可省 buffer 内存，代价是弹幕被拉伸放大后变糊。
-    // 真机实测（Amlogic S912 / 1080p）：1.0 与 0.75 的 swap（2.75ms vs 2.87ms）、
-    // avg 帧耗时（7.86ms vs 8.05ms）、fps（56.0 vs 55.6）三项全在噪声范围内——swap 是
-    // 延迟受限而非带宽受限，降分辨率换不到任何性能，只会白白损失清晰度。保持 1.0。
-    private val renderScale = 1.0f
+    // TV 透明 Surface 需要每秒清空并合成整张 RGBA buffer。内部按 0.75 等比例渲染可减少
+    // 43.75% 像素填充；View/逻辑视口仍是完整 1920x1080，因此横纵缩放一致，不会再出现
+    // 早期“只缩内容 band”导致的字体纵向压扁。手机/平板保留原生分辨率。
+    private val renderScale = if (isTvLikeDevice) 0.75f else 1.0f
     @Volatile private var released = false
     private var renderLoopRunning = false
     private val frameCallback = FrameCallback()
@@ -192,6 +265,11 @@ class GlDanmakuView @JvmOverloads constructor(
     private var perfLastLogUptimeMs = 0L
     private var perfAccumSwapNs = 0L
     private var perfMaxSwapNs = 0L
+    private var perfLastFrameTimeNs = Long.MIN_VALUE
+    private var perfAccumFrameIntervalNs = 0L
+    private var perfMaxFrameIntervalNs = 0L
+    private var perfFrameIntervalCount = 0
+    private var perfVsyncGapCount = 0
     @Volatile private var lastSwapMs = 0f
 
     // ---- Debug Overlay（方案 §70；RenderThread 采集 RingBuffer，onDraw 主线程绘制）----
@@ -383,27 +461,45 @@ class GlDanmakuView @JvmOverloads constructor(
     }
 
     override fun notifySeek(positionMs: Long) {
+        val target = positionMs.coerceAtLeast(0L)
         seekSerial.incrementAndGet()
         val old = providerSnapshot
+        // P3：sample 与采样时刻成对更新，sequence 递增标识新样本。
         providerSnapshot = old.copy(
-            positionMs = positionMs.coerceAtLeast(0L),
-            sampledAtRealtimeNs = SystemClock.elapsedRealtimeNanos(),
+            sample = old.sample.copy(
+                mediaPositionNs = target * 1_000_000L,
+                sampledAtRealtimeNs = SystemClock.elapsedRealtimeNanos(),
+                sequence = old.sequence + 1L,
+            ),
         )
+        // 场景重建（清旧弹幕 / 重排轨道）两种模式都需要：engine 的 seekTo → rebuildScene。
         actionHandler.obtainMessage(MSG_SEEK, positionMs).sendToTarget()
+        if (clockMode == DanmakuClockMode.CONTINUOUS) {
+            // NEW_CLOCK：seek 由 RenderThread 驱动在下一帧以该帧 presentationTime 硬锚。
+            pendingSeekPositionMs.set(target)
+        }
         // allowClockBackwardTo 必须与 stepTime 同线程（RenderThread），避免跨线程重置/写入交错。
         renderHandler.post {
-            engine.allowClockBackwardTo(positionMs.coerceAtLeast(0L))
+            engine.allowClockBackwardTo(target)
             startRenderLoopIfNeeded()
         }
     }
 
     override fun updateDanmakuTimeFactor(factor: Float) {
+        // NEW_CLOCK：时间漂移只由 ClockSynchronizer 治理，软同步因子退役。
+        if (clockMode == DanmakuClockMode.CONTINUOUS) return
         timer.softSyncFactor = factor.toDouble()
     }
 
-    override fun currentDanmakuPositionMs(): Long = engine.currentPositionMs()
+    override fun currentDanmakuPositionMs(): Long {
+        // NEW_CLOCK：engine.currentPositionMs 由 stepTime(smoothPos) 写入，即为连续媒体时钟输出，
+        // 无需额外转换（渲染线程每帧已 stepTime）。
+        return engine.currentPositionMs()
+    }
 
     override fun syncDanmakuTimerTo(positionMs: Long) {
+        // NEW_CLOCK：不允许轻量回拨（定稿约束 3/4），由 ClockSynchronizer 冻结/减速吸收。
+        if (clockMode == DanmakuClockMode.CONTINUOUS) return
         // timer.step 在 RenderThread 推进；syncTo 与其同线程，避免并发覆盖。
         renderHandler.post { timer.syncTo(positionMs) }
     }
@@ -435,7 +531,7 @@ class GlDanmakuView @JvmOverloads constructor(
     private fun drawDiagnosticOverlay(canvas: Canvas, snap: GlDiagnosticSnapshot) {
         val lineH = dp(18f).toFloat()
         val padding = dp(8f).toFloat()
-        val panelW = dp(310f).toFloat()
+        val panelW = dp(360f).toFloat()
         val panelH = lineH * DIAG_LINE_COUNT + padding * 2f
         canvas.drawRect(0f, 0f, panelW, panelH, diagBgPaint)
         val sb = StringBuilder(96)
@@ -456,6 +552,15 @@ class GlDanmakuView @JvmOverloads constructor(
         line { append("P99=").append(fmt2(snap.frameP99Ms)).append("ms  active=").append(snap.active) }
         line { append("snapshot=").append(snap.snapshotCount).append("  atlas=").append(snap.atlasPages).append("p") }
         line {
+            append("clock=").append(snap.clockState).append('/').append(snap.clockDecision)
+                .append(" err=").append(fmt1(snap.clockErrorMs)).append("ms")
+        }
+        line {
+            append("corr=").append(fmt2(snap.clockCorrectionPercent)).append('%')
+                .append(" speed=").append(fmt3(snap.clockEffectiveSpeed)).append('x')
+                .append(" age=").append(snap.clockSampleAgeMs.toInt()).append("ms")
+        }
+        line {
             append("mask=")
                 .append(if (snap.maskFailOpen) "bypass" else if (snap.maskApplied) "on" else "off")
                 .append("  visible=").append(snap.maskCoveragePercent).append('%')
@@ -466,6 +571,8 @@ class GlDanmakuView @JvmOverloads constructor(
     private fun fmt1(v: Float): String = String.format(Locale.US, "%.1f", v)
 
     private fun fmt2(v: Float): String = String.format(Locale.US, "%.2f", v)
+
+    private fun fmt3(v: Float): String = String.format(Locale.US, "%.3f", v)
 
     override fun onDetachedFromWindow() {
         updateUiFrameMonitor(false)
@@ -479,6 +586,7 @@ class GlDanmakuView @JvmOverloads constructor(
         released = true
         stopProviderSampler()
         renderHandler.post {
+            clockDriver.reset()
             renderLoopRunning = false
             runCatching { Choreographer.getInstance().removeFrameCallback(frameCallback) }
         }
@@ -523,19 +631,29 @@ class GlDanmakuView @JvmOverloads constructor(
     private fun sampleProvidersOnMain() {
         check(Looper.myLooper() == Looper.getMainLooper())
         val previous = providerSnapshot
+        // P3：采样时刻与 position 读取成对绑定（先取 before，读 position，再取 after 取中）。
+        val positionReadStartedNs = SystemClock.elapsedRealtimeNanos()
+        val positionMs = runCatching { positionProvider?.invoke() }.getOrNull()?.coerceAtLeast(0L)
+            ?: previous.positionMs
+        val positionReadFinishedNs = SystemClock.elapsedRealtimeNanos()
+        val sampledAtNs = positionReadStartedNs + (positionReadFinishedNs - positionReadStartedNs) / 2L
         val speed =
             runCatching { playbackSpeedProvider?.invoke() }.getOrNull()
                 ?.takeIf { it.isFinite() && it > 0f }
                 ?: previous.speed
         val next =
             ProviderSnapshot(
-                positionMs = runCatching { positionProvider?.invoke() }.getOrNull()?.coerceAtLeast(0L)
-                    ?: previous.positionMs,
-                sampledAtRealtimeNs = SystemClock.elapsedRealtimeNanos(),
-                isPlaying = runCatching { isPlayingProvider?.invoke() }.getOrNull() ?: previous.isPlaying,
+                sample = MediaClockSample(
+                    mediaPositionNs = positionMs * 1_000_000L,
+                    sampledAtRealtimeNs = sampledAtNs,
+                    playbackSpeed = speed.toDouble(),
+                    isPlaying = runCatching { isPlayingProvider?.invoke() }.getOrNull()
+                        ?: previous.isPlaying,
+                    playbackState = 0,
+                    sequence = previous.sequence + 1L,
+                ),
                 playWhenReady = runCatching { playWhenReadyProvider?.invoke() }.getOrNull()
                     ?: previous.playWhenReady,
-                speed = speed,
                 config = runCatching { configProvider?.invoke() }.getOrNull() ?: previous.config,
             )
         providerSnapshot = next
@@ -587,8 +705,8 @@ class GlDanmakuView @JvmOverloads constructor(
             laneDensity = DanmakuLaneDensity.Standard,
         )
 
-    private fun scrollX(width: Int, nowMs: Int, startTimeMs: Int, pxPerMs: Float): Float {
-        val elapsed = (nowMs - startTimeMs).coerceAtLeast(0)
+    private fun scrollX(width: Int, nowMs: Float, startTimeMs: Int, pxPerMs: Float): Float {
+        val elapsed = (nowMs - startTimeMs).coerceAtLeast(0f)
         return width.toFloat() - elapsed * pxPerMs
     }
 
@@ -635,6 +753,7 @@ class GlDanmakuView @JvmOverloads constructor(
         val count = frameTimeRingCount
         val copy = frameTimeRingNs.copyOf(count)
         copy.sort()
+        val clockDiag = clockDriver.diagnostics()
         diagSnapshot =
             GlDiagnosticSnapshot(
                 // fps 用窗口增量（非 RingBuffer 累计帧数），否则会随运行时间持续虚高。
@@ -654,6 +773,12 @@ class GlDanmakuView @JvmOverloads constructor(
                 maskApplied = maskApplied,
                 maskFailOpen = maskFailOpen,
                 maskCoveragePercent = maskCoveragePercent,
+                clockState = clockDiag.state,
+                clockDecision = clockDiag.decision,
+                clockSampleAgeMs = clockDiag.sampleAgeMs.toFloat(),
+                clockErrorMs = clockDiag.errorMs.toFloat(),
+                clockCorrectionPercent = clockDiag.correctionPercent.toFloat(),
+                clockEffectiveSpeed = clockDiag.effectiveSpeed.toFloat(),
             )
         // The diagnostics View layer is intentionally refreshed only at 2Hz. Invalidating it at
         // GL frame rate would put the full player window back on the HWUI critical path.
@@ -801,7 +926,6 @@ class GlDanmakuView @JvmOverloads constructor(
                         logicalViewportHeight.coerceAtLeast(h),
                     ).sendToTarget()
                 }
-                MSG_FRAME -> renderAndSchedule(SystemClock.elapsedRealtimeNanos())
             }
         }
     }
@@ -868,32 +992,19 @@ class GlDanmakuView @JvmOverloads constructor(
     }
 
     private fun renderAndSchedule(frameTimeNanos: Long) {
-        val renderStartedNs = System.nanoTime()
-        if (released || !eglReady) {
+        if (released || !eglReady || !renderLoopRunning) {
             renderLoopRunning = false
             return
         }
+        // 先注册下一拍，让 DisplayEventReceiver 在本帧 GL 工作期间也能接收下一次 vsync；
+        // 旧实现渲染结束后才注册，稍晚就会直接落到下下个 vsync。
+        Choreographer.getInstance().postFrameCallback(frameCallback)
         try {
             doRenderFrame(frameTimeNanos)
         } catch (t: Throwable) {
             if (AppLog.isEnabled) {
                 AppLog.w(TAG, "render frame failed", t)
             }
-        }
-        if (!renderLoopRunning || released || !eglReady) return
-
-        val renderElapsedNs = (System.nanoTime() - renderStartedNs).coerceAtLeast(0L)
-        if (renderElapsedNs >= TARGET_FRAME_NS) {
-            // 慢帧立即补一帧：本帧已错过至少一个 vsync，若再等下一个 Choreographer 回调
-            // 会叠加第二个空档（25ms 的帧变成 ~40ms 的间隔），滚动弹幕随之"顿一下"。
-            // 用最新媒体时钟立即排一帧；历史帧不会重放，Handler 串行化避免追赶爆发。
-            // 注：真机（Amlogic S912）swap 仅 2.6~3ms、avg 7~8ms，慢帧来自偶发解码/合成
-            // 竞争；立即补帧能明显抹平滚动抖动。"纯 vsync 单一节拍"曾被误判为更稳，
-            // 实测反而放大了非匀速（每个慢帧后多等最多 16.67ms），已回退。
-            renderHandler.sendEmptyMessage(MSG_FRAME)
-        } else {
-            // 快帧保持 vsync 对齐，不忙等、不上冲 60fps。
-            Choreographer.getInstance().postFrameCallback(frameCallback)
         }
     }
 
@@ -903,6 +1014,14 @@ class GlDanmakuView @JvmOverloads constructor(
      */
     private fun doRenderFrame(frameTimeNanos: Long) {
         val perfStartNs = System.nanoTime()
+        if (perfLastFrameTimeNs != Long.MIN_VALUE && frameTimeNanos > perfLastFrameTimeNs) {
+            val intervalNs = frameTimeNanos - perfLastFrameTimeNs
+            perfAccumFrameIntervalNs += intervalNs
+            if (intervalNs > perfMaxFrameIntervalNs) perfMaxFrameIntervalNs = intervalNs
+            perfFrameIntervalCount++
+            if (intervalNs >= VSYNC_GAP_THRESHOLD_NS) perfVsyncGapCount++
+        }
+        perfLastFrameTimeNs = frameTimeNanos
         val sampled = providerSnapshot
         val cfg = sampled.config
         if (cfg != lastConfig) {
@@ -919,17 +1038,30 @@ class GlDanmakuView @JvmOverloads constructor(
         val isPlaying = sampled.isPlaying
         val playWhenReady = sampled.playWhenReady
         val speed = sampled.speed
-        val elapsedSinceSampleNs = (frameTimeNanos - sampled.sampledAtRealtimeNs).coerceAtLeast(0L)
-        val rawPos =
-            if (isPlaying) {
-                sampled.positionMs + (elapsedSinceSampleNs.toDouble() / 1_000_000.0 * speed).toLong()
-            } else {
-                sampled.positionMs
-            }
+
+        // P2：同一渲染帧内所有模块（Clock/Motion/Swap）共用同一个 presentationTimeNs。
+        // API33+ 期望时刻可用时优先（future），否则回退 frameTimeNs（定稿约束 1/19）。
+        val presentationTimeNs =
+            PresentationTimestampResolver.resolve(expectedPresentationTimeNs, frameTimeNanos)
 
         val frameId = uiFrameId.incrementAndGet()
-        val smoothPos = timer.step(System.nanoTime(), rawPos, isPlaying, speed, seekSerial.get())
-        engine.stepTime(smoothPos, frameId)
+        // CONTINUOUS 输出纳秒；LEGACY 输出整数 ms，这里统一 *1e6 转 ns 对齐 stepTime。
+        val smoothPosNs: Long =
+            if (clockMode == DanmakuClockMode.CONTINUOUS) {
+                advanceContinuousClock(presentationTimeNs, sampled.sample)
+            } else {
+                // LEGACY：保持原增量积分 + 追赶行为不变。
+                val elapsedSinceSampleNs =
+                    (frameTimeNanos - sampled.sampledAtRealtimeNs).coerceAtLeast(0L)
+                val rawPos =
+                    if (isPlaying) {
+                        sampled.positionMs + (elapsedSinceSampleNs.toDouble() / 1_000_000.0 * speed).toLong()
+                    } else {
+                        sampled.positionMs
+                    }
+                timer.step(System.nanoTime(), rawPos, isPlaying, speed, seekSerial.get()) * 1_000_000L
+            }
+        engine.stepTime(smoothPosNs, frameId)
         cacheManager.drainReleasedBitmaps(frameId)
 
         // Action 线程执行调度（下一帧生效；去重避免积压）。
@@ -956,7 +1088,8 @@ class GlDanmakuView @JvmOverloads constructor(
 
         val snapshot = engine.acquireRenderSnapshot()
         try {
-            val nowMs = smoothPos.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            // 亚毫秒浮点时间：消除整数 ms 截断导致的 60Hz 步进抖动。
+            val nowMs = (smoothPosNs.toDouble() / 1_000_000.0).toFloat()
             val alpha = (cfg.opacity * 255f).roundToInt().coerceIn(0, 255) / 255f
             for (i in 0 until snapshot.count) {
                 val item = snapshot.items[i] ?: continue
@@ -982,7 +1115,9 @@ class GlDanmakuView @JvmOverloads constructor(
             engine.releaseRenderSnapshot(snapshot)
         }
 
-        e.setPresentationTime(frameTimeNanos)
+        // 不再调用 e.setPresentationTime(presentationTimeNs)：frameTimeNanos 是「当前 vsync 时刻」，
+        // swap 发生在它之后 6~9ms，等于每次塞给 SurfaceFlinger 一个过期时间戳，可能干扰合成队列、
+        // 诱发偶发 swap 阻塞。移除后走 SurfaceFlinger 默认（下一个 vsync 呈现），位置计算不受影响。
         val swapStartedNs = System.nanoTime()
         val swapSucceeded = e.swapBuffers()
         val swapNs = (System.nanoTime() - swapStartedNs).coerceAtLeast(0L)
@@ -1020,19 +1155,35 @@ class GlDanmakuView @JvmOverloads constructor(
                 val count = perfFrameCount.coerceAtLeast(1)
                 val avgMs = perfAccumFrameNs.toDouble() / count / 1_000_000.0
                 val avgSwapMs = perfAccumSwapNs.toDouble() / count / 1_000_000.0
+                val cadenceCount = perfFrameIntervalCount.coerceAtLeast(1)
+                val avgCadenceMs = perfAccumFrameIntervalNs.toDouble() / cadenceCount / 1_000_000.0
+                val clockDiag = clockDriver.diagnostics()
                 AppLog.i(
                     TAG,
                     "perf fps=${String.format(Locale.US, "%.1f", count.toFloat() * 1000f / PERF_LOG_INTERVAL_MS)} " +
                         "avg=${String.format(Locale.US, "%.2f", avgMs)}ms " +
                         "swap=${String.format(Locale.US, "%.2f", avgSwapMs)}/${String.format(Locale.US, "%.2f", perfMaxSwapNs / 1_000_000.0)}ms " +
                         "max=${String.format(Locale.US, "%.2f", perfMaxFrameNs / 1_000_000.0)}ms " +
-                        "active=${r.lastDrawnInstanceCount} snapshot=${snapshot.count} atlasPages=${a.pageCount()}"
+                        "cadence=${String.format(Locale.US, "%.2f", avgCadenceMs)}/${String.format(Locale.US, "%.2f", perfMaxFrameIntervalNs / 1_000_000.0)}ms " +
+                        "targetFps=$targetRenderFps vsyncGaps=$perfVsyncGapCount " +
+                        "active=${r.lastDrawnInstanceCount} snapshot=${snapshot.count} atlasPages=${a.pageCount()} " +
+                        "drawCalls=${r.lastDrawCallCount} " +
+                        "clock=${clockDiag.state}/${clockDiag.decision} " +
+                        "clockErr=${String.format(Locale.US, "%.2f", clockDiag.errorMs)}ms " +
+                        "corr=${String.format(Locale.US, "%.2f", clockDiag.correctionPercent)}% " +
+                        "effectiveSpeed=${String.format(Locale.US, "%.3f", clockDiag.effectiveSpeed)}x " +
+                        "sampleAge=${String.format(Locale.US, "%.1f", clockDiag.sampleAgeMs)}ms " +
+                        "reanchor=${clockDiag.reanchorCount} duplicateSkip=${clockDiag.duplicateSampleSkipCount}"
                 )
             }
             perfAccumFrameNs = 0L
             perfMaxFrameNs = 0L
             perfAccumSwapNs = 0L
             perfMaxSwapNs = 0L
+            perfAccumFrameIntervalNs = 0L
+            perfMaxFrameIntervalNs = 0L
+            perfFrameIntervalCount = 0
+            perfVsyncGapCount = 0
             perfFrameCount = 0
         }
 
@@ -1040,6 +1191,28 @@ class GlDanmakuView @JvmOverloads constructor(
         if (!isPlaying && !playWhenReady) {
             renderLoopRunning = false
         }
+    }
+
+    /**
+     * NEW_CLOCK（CONTINUOUS）单帧时钟推进：
+     * - 以本帧 presentationTimeNs 作为唯一时间源（定稿约束 1/19；本阶段解析结果 =
+     *   frameTimeNs，API33 expectedPresentationTimeNs 注入后自动升级）；
+     * - ProviderSnapshot → MediaClockSample（position 与采样时刻成对）；
+     * - RenderClockDriver.advance 内部处理播放边沿 / 周期同步 / Seek 硬锚；
+     * - 返回连续媒体位置 ms 供 engine.stepTime 与滚动 x 计算。
+     *
+     * 仅在 RenderThread 调用；pendingSeek 在驱动内消费后复位。
+     */
+    private fun advanceContinuousClock(
+        presentationTimeNs: Long,
+        sample: MediaClockSample,
+    ): Long {
+        val pendingSeekMs = pendingSeekPositionMs.getAndSet(-1L)
+        return clockDriver.advance(
+            frameTimeNs = presentationTimeNs,
+            sample = sample,
+            pendingSeekMediaNs = if (pendingSeekMs >= 0L) pendingSeekMs * 1_000_000L else null,
+        )
     }
 
     // ========== ActionThread ==========
@@ -1129,4 +1302,10 @@ internal data class GlDiagnosticSnapshot(
     val maskApplied: Boolean,
     val maskFailOpen: Boolean,
     val maskCoveragePercent: Int,
+    val clockState: String,
+    val clockDecision: String,
+    val clockSampleAgeMs: Float,
+    val clockErrorMs: Float,
+    val clockCorrectionPercent: Float,
+    val clockEffectiveSpeed: Float,
 )
