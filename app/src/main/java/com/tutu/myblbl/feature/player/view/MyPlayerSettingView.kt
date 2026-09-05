@@ -16,7 +16,6 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.tutu.myblbl.R
 import com.tutu.myblbl.core.common.log.AppLog
-import com.tutu.myblbl.feature.player.danmaku.DanmakuRenderMode
 import com.tutu.myblbl.feature.player.settings.AfterPlayMode
 import com.tutu.myblbl.feature.player.LiveLineInfo
 import com.tutu.myblbl.feature.player.LiveQualityInfo
@@ -58,7 +57,6 @@ class MyPlayerSettingView @JvmOverloads constructor(
         internal const val KEY_DM_MERGE_DUPLICATE = "dm_merge_duplicate"
         internal const val KEY_DM_SMART_SHIELD = "dm_smart_shield"
         internal const val KEY_DM_TRACK_SPACING = "dm_track_spacing"
-        internal const val KEY_DM_RENDER_MODE = "dm_render_mode"
 
         private const val LEVEL_MAIN = 1
         private const val LEVEL_SUB = 2
@@ -88,7 +86,6 @@ class MyPlayerSettingView @JvmOverloads constructor(
         internal const val ITEM_DM_ALLOW_BOTTOM = 107
         internal const val ITEM_DM_MERGE_DUPLICATE = 108
         internal const val ITEM_DM_SMART_SHIELD = 109
-        internal const val ITEM_DM_RENDER_MODE = 110
     }
 
     private val panelWidthPx by lazy { resources.getDimensionPixelSize(R.dimen.px650) }
@@ -459,7 +456,6 @@ class MyPlayerSettingView @JvmOverloads constructor(
     fun getDmMergeDuplicate(): Boolean = panelState.dmMergeDuplicate
     fun getDmSmartShield(): Boolean = panelState.dmSmartShield
     fun getDmTrackSpacingPref(): String = preferenceStore.getTrackSpacingPref()
-    fun getDmRenderMode(): DanmakuRenderMode = panelState.dmRenderMode
 
     fun setScreenMirrorEnabled(enabled: Boolean) {
         updateState { state ->
@@ -650,13 +646,6 @@ class MyPlayerSettingView @JvmOverloads constructor(
                 val newValue = itemId == 0 && !panelState.screenMirrorEnabled
                 updateState { it.copy(dmSmartShield = newValue) }
                 onPlayerSettingInnerChange?.onDmSmartShield(panelState.dmSmartShield)
-            }
-
-            ITEM_DM_RENDER_MODE -> {
-                val selected = DanmakuRenderMode.values().getOrNull(itemId) ?: return
-                updateState { it.copy(dmRenderMode = selected) }
-                preferenceStore.saveDmRenderMode(selected)
-                onPlayerSettingInnerChange?.onDmRenderModeChange(selected)
             }
         }
         showDmSettingMenu(animateTransition = true)

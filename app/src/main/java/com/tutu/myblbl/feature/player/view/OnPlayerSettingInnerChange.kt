@@ -1,7 +1,5 @@
 package com.tutu.myblbl.feature.player.view
 
-import com.tutu.myblbl.feature.player.danmaku.DanmakuRenderMode
-
 interface OnPlayerSettingInnerChange {
     fun onPlaybackSpeedChange(speed: Float)
     fun onDmEnableChange(enabled: Boolean)
@@ -14,5 +12,4 @@ interface OnPlayerSettingInnerChange {
     fun onDmMergeDuplicate(merge: Boolean)
     fun onDmSmartShield(enabled: Boolean)
     fun onAspectRatioChange(ratio: Int)
-    fun onDmRenderModeChange(mode: DanmakuRenderMode)
 }

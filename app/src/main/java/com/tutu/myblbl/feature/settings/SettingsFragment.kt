@@ -113,7 +113,6 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
         private const val KEY_DM_ALLOW_VIP_COLORFUL_DM = "dm_allow_vip_colorful_dm"
         private const val KEY_DM_MERGE_DUPLICATE = "dm_merge_duplicate"
         private const val KEY_DM_SMART_SHIELD = "dm_smart_shield"
-        private const val KEY_DM_RENDER_MODE = "dm_render_mode"
         private const val KEY_GAIA_VGATE_V_VOUCHER = "gaia_vgate_v_voucher"
         private const val KEY_GAIA_VGATE_V_VOUCHER_SAVED_AT_MS = "gaia_vgate_v_voucher_saved_at_ms"
         private const val KEY_IPV4_ONLY = "ipv4_only"
@@ -258,8 +257,7 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
             SettingModel(getString(R.string.allow_vip_colorful_dm), "开"),
             SettingModel(getString(R.string.dm_merge_duplicate), "开"),
             SettingModel(getString(R.string.dm_smart_shield), "关"),
-            SettingModel(getString(R.string.show_dm_switch), "关"),
-            SettingModel("渲染引擎", "GPU")
+            SettingModel(getString(R.string.show_dm_switch), "关")
         )
 
         deviceSettings.add(DEVICE_POSITION_VERSION, SettingModel("应用版本", BuildConfig.VERSION_NAME))
@@ -599,7 +597,6 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
                 appSettings.putStringAsync(KEY_DM_SMART_SHIELD, value)
             }
             12 -> toggleSetting(dmSettings, 12, KEY_SHOW_DM_SWITCH)
-            13 -> showDmChoiceDialog(position, KEY_DM_RENDER_MODE, arrayOf("GPU", "Canvas"))
         }
     }
 
@@ -1121,7 +1118,6 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
         applySavedValue(dmSettings, 10, KEY_DM_MERGE_DUPLICATE)
         applySavedValue(dmSettings, 11, KEY_DM_SMART_SHIELD)
         applySavedValue(dmSettings, 12, KEY_SHOW_DM_SWITCH)
-        applySavedValue(dmSettings, 13, KEY_DM_RENDER_MODE)
     }
 
     private fun applySavedValue(target: MutableList<SettingModel>, index: Int, key: String) {

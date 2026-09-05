@@ -58,15 +58,12 @@ import com.tutu.myblbl.feature.player.LiveQualityInfo
 import com.tutu.myblbl.feature.player.PlaybackStartupTrace
 import com.tutu.myblbl.feature.player.danmaku.BlblDanmakuController
 import com.tutu.myblbl.feature.player.danmaku.DanmakuRenderHost
-import com.tutu.myblbl.feature.player.danmaku.DanmakuRenderMode
-import com.tutu.myblbl.feature.player.danmaku.DanmakuView
 import com.tutu.myblbl.feature.player.danmaku.render.GlDanmakuView
 import com.tutu.myblbl.feature.player.danmaku.common.DanmakuSettingsSnapshot
 import com.tutu.myblbl.feature.player.danmaku.common.DanmakuController
 import com.tutu.myblbl.feature.player.danmaku.common.LiveDanmakuController
 import com.tutu.myblbl.feature.player.DanmakuFilterContext
 import com.tutu.myblbl.feature.player.sponsor.SponsorSegment
-import kotlin.jvm.Volatile
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -232,12 +229,9 @@ class MyPlayerView @JvmOverloads constructor(
     private val gestureDetector = GestureDetector(context, gestureListener)
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
 
-    // 弹幕渲染后端模式：GPU 优先（默认），EGL 失败自动降级 Canvas。
-    var danmakuRenderMode: DanmakuRenderMode = DanmakuRenderMode.GL
-    @Volatile private var glDanmakuFailed = false
-
+    // 弹幕渲染后端：仅 GPU（Canvas 引擎已于 1.6.16+ 移除）。
     // 弹幕时钟模式（P1 A/B 实验 → P7/P8 生产默认）。
-    // P8 默认 = CONTINUOUS（双后端 GPU/Canvas 均已接入 ContinuousMediaClock；见 docs 方案 §0.7/P8）。
+    // P8 默认 = CONTINUOUS（GPU 接入 ContinuousMediaClock；见 docs 方案 §0.7/P8）。
     // LEGACY 保留为回退档（DanmakuTimer 已标记废弃，真机验证通过后删除）。
     var danmakuClockMode: com.tutu.myblbl.feature.player.danmaku.clock.DanmakuClockMode =
         com.tutu.myblbl.feature.player.danmaku.clock.DanmakuClockMode.CONTINUOUS
@@ -247,17 +241,7 @@ class MyPlayerView @JvmOverloads constructor(
             liteDanmakuView?.setDanmakuClockMode(value)
         }
 
-    /** 切换弹幕渲染后端（GPU / Canvas），下次创建弹幕引擎时生效。 */
-    fun switchDanmakuRenderMode(mode: DanmakuRenderMode) {
-        if (danmakuRenderMode == mode) return
-        danmakuRenderMode = mode
-        glDanmakuFailed = false
-    }
-
-    private fun resolveDanmakuRenderMode(): DanmakuRenderMode =
-        if (glDanmakuFailed) DanmakuRenderMode.CANVAS else danmakuRenderMode
-
-    // 弹幕渲染宿主（GPU 或 Canvas），由 setupDanmakuEngine() 创建并挂到蒙版宿主。
+    // 弹幕渲染宿主（GPU），由 setupDanmakuEngine() 创建并挂到蒙版宿主。
     private var liteDanmakuView: DanmakuRenderHost? = null
     private var liteDanmakuController: BlblDanmakuController? = null
 
@@ -769,9 +753,6 @@ class MyPlayerView @JvmOverloads constructor(
                 }
             }
 
-            override fun onDmRenderModeChange(mode: DanmakuRenderMode) {
-                switchDanmakuEngine(mode)
-            }
         })
         syncDanmakuSettings()
         dmMaskController.setEnabled(settingView?.getDmSmartShield() ?: false)
@@ -2807,21 +2788,16 @@ class MyPlayerView @JvmOverloads constructor(
      */
     fun setupDanmakuEngine() {
         if (liteDanmakuController != null) return
-        // 从设置面板读取持久化的渲染后端（panel state 已在创建时从 AppSettings 加载），
-        // 使 App 设置里的选择在每次播放/重启后生效。
-        settingView?.getDmRenderMode()?.let { danmakuRenderMode = it }
+        // 仅 GPU 引擎（Canvas 已于 1.6.16+ 移除）。
         val view: DanmakuRenderHost =
-            when (resolveDanmakuRenderMode()) {
-                DanmakuRenderMode.GL ->
-                    GlDanmakuView(context).also {
-                        val glView = it
-                        it.onEglFailed = { post { fallbackToCanvasDanmaku(glView) } }
-                        // GPU 弹幕引擎的防挡蒙版：消费 maskHost 发布的 path 快照。
-                        it.maskHostProvider = { dmkMaskHost }
-                        // Debug Overlay 的视频 FPS：来自播放器 VideoFrameMetadataListener 统计。
-                        it.videoFpsProvider = { videoFps }
-                    }
-                DanmakuRenderMode.CANVAS -> DanmakuView(context)
+            GlDanmakuView(context).also { glView ->
+                // GPU 引擎初始化失败（EGL 不可用等）时不再回退 Canvas：
+                // 静默禁用弹幕层并停止控制器，保证播放不受影响。
+                glView.onEglFailed = { post { disableDanmakuAfterEglFailure(glView) } }
+                // GPU 弹幕引擎的防挡蒙版：消费 maskHost 发布的 path 快照。
+                glView.maskHostProvider = { dmkMaskHost }
+                // Debug Overlay 的视频 FPS：来自播放器 VideoFrameMetadataListener 统计。
+                glView.videoFpsProvider = { videoFps }
             }
         val renderView = view.renderView
         renderView.layoutParams = FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
@@ -2829,7 +2805,7 @@ class MyPlayerView @JvmOverloads constructor(
         renderView.isFocusable = false
         dmkMaskHost?.addView(renderView) ?: addView(renderView)
         liteDanmakuView = view
-        // 应用持久化的时钟模式（P1 A/B；GPU 支持 CONTINUOUS，Canvas no-op）。
+        // 应用持久化的时钟模式（P1 A/B；GPU 支持 CONTINUOUS）。
         view.setDanmakuClockMode(danmakuClockMode)
         liteDanmakuController = BlblDanmakuController(context) { liteDanmakuView }.also {
             it.playerPositionProvider = { playerPositionMs }
@@ -2841,54 +2817,12 @@ class MyPlayerView @JvmOverloads constructor(
         restoreOverlayZOrder()
     }
 
-    /**
-     * 切换弹幕渲染后端并立即生效：拆掉当前引擎 → 用新模式重建 → 重喂数据与位置。
-     * 供设置面板的"渲染引擎"开关调用；同模式直接返回，不重建。
-     */
-    fun switchDanmakuEngine(mode: DanmakuRenderMode) {
-        if (resolveDanmakuRenderMode() == mode) return
-        // 拆掉当前引擎（先 release 控制器，再从蒙版宿主移除渲染 View）。
-        liteDanmakuController?.release()
-        liteDanmakuView?.renderView?.let { view -> (view.parent as? ViewGroup)?.removeView(view) }
-        liteDanmakuView = null
-        liteDanmakuController = null
-        danmakuRenderMode = mode
-        glDanmakuFailed = false
-        // 用新模式重建，并同步设置。
-        // P7 起 Canvas 后端同样支持 CONTINUOUS 时钟（DanmakuPlayer.advanceContinuousClock），
-        // 不再因切换后端而降级 LEGACY——降级会让连续媒体时钟特性静默失效。
-        setupDanmakuEngine()
-        syncDanmakuSettings()
-        // 重喂最近一次弹幕数据，并把新引擎 seek 到当前播放位置。
-        lastDanmakuData?.let { data ->
-            activeDanmakuController()?.setData(data, lastDanmakuFilterContext, PlaybackStartupTrace.NO_TRACE, 0L)
-        }
-        activeDanmakuController()?.syncPosition(playerPositionMs, forceSeek = true)
-        restoreOverlayZOrder()
-    }
-
-    private fun fallbackToCanvasDanmaku(failedView: GlDanmakuView) {
+    /** GPU 弹幕引擎初始化失败（EGL 不可用）的处理：无 Canvas 兜底，静默禁用弹幕层。 */
+    private fun disableDanmakuAfterEglFailure(failedView: GlDanmakuView) {
         if (liteDanmakuView !== failedView) return
-        glDanmakuFailed = true
-        // 仅回退渲染后端，不动时钟模式：Canvas 后端自 P7 起同样支持 CONTINUOUS。
-        val failedRenderView = failedView.renderView
-        val parent = failedRenderView.parent as? ViewGroup
-        val childIndex = parent?.indexOfChild(failedRenderView) ?: -1
-        parent?.removeView(failedRenderView)
-
-        val fallback = DanmakuView(context)
-        fallback.layoutParams = FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
-        fallback.isClickable = false
-        fallback.isFocusable = false
-        if (parent != null) {
-            parent.addView(fallback, childIndex.coerceAtLeast(0))
-        } else {
-            dmkMaskHost?.addView(fallback) ?: addView(fallback)
-        }
-        liteDanmakuView = fallback
-        liteDanmakuController?.onRenderHostChanged()
-        restoreOverlayZOrder()
-        AppLog.w("GlDmView", "GPU danmaku backend failed; Canvas backend restored")
+        AppLog.w("GlDmView", "GPU danmaku backend init failed; danmaku disabled (Canvas backend removed)")
+        liteDanmakuView?.setRenderVisible(false)
+        liteDanmakuController?.setEnabled(false)
     }
 
     fun setDanmakuData(

@@ -40,6 +40,7 @@ import com.tutu.myblbl.feature.player.danmaku.clock.DanmakuClockMode
 import com.tutu.myblbl.feature.player.danmaku.clock.MediaClockSample
 import com.tutu.myblbl.feature.player.danmaku.clock.PresentationTimestampResolver
 import com.tutu.myblbl.feature.player.danmaku.clock.RenderClockDriver
+import com.tutu.myblbl.feature.player.danmaku.clock.projectSample
 import com.tutu.myblbl.feature.player.danmaku.common.BiliDanmakuStyle
 import com.tutu.myblbl.feature.player.danmaku.model.DanmakuKind
 import com.tutu.myblbl.feature.player.view.DanmakuMaskHostLayout
@@ -56,8 +57,8 @@ import java.util.concurrent.atomic.AtomicLong
  * - ActionThread：弹幕调度（Timeline 入场/轨道分配/缓存调度），复用 [DanmakuEngine] 成熟逻辑。
  * - 主线程：仅做 View 操作与参数注入（providers），渲染状态由 RenderThread 独占。
  *
- * 与 Canvas 引擎（[BlblDanmakuController] 原 [com.tutu.myblbl.feature.player.danmaku.DanmakuView]）共用同一套
- * [DanmakuRenderHost] 接口，可无缝切换；EGL 初始化失败通过 [onEglFailed] 通知上层回退。
+ * 与 [BlblDanmakuController] 经 [DanmakuRenderHost] 接口驱动；自 1.6.16+ 起为唯一渲染引擎
+ * （Canvas 引擎已移除）。EGL 初始化失败通过 [onEglFailed] 通知上层禁用弹幕层。
  *
  * 说明：
  * - 防挡蒙版（mask）通过 View 层 clipPath 实现，对独立 Surface 无效；GPU 引擎 V1 不做蒙版裁剪
@@ -255,7 +256,7 @@ class GlDanmakuView @JvmOverloads constructor(
     private val viewportTopInsetPx = dp(2f)
     private val viewportBottomInsetPx = dp(52f)
 
-    /** EGL 初始化失败回调：上层用于自动降级到 Canvas 引擎。 */
+    /** EGL 初始化失败回调：上层据此禁用弹幕层（Canvas 引擎已移除，无回退）。 */
     var onEglFailed: (() -> Unit)? = null
 
     // ---- 性能采样（RenderThread 私有，周期日志）----
@@ -705,9 +706,17 @@ class GlDanmakuView @JvmOverloads constructor(
             laneDensity = DanmakuLaneDensity.Standard,
         )
 
-    private fun scrollX(width: Int, nowMs: Float, startTimeMs: Int, pxPerMs: Float): Float {
-        val elapsed = (nowMs - startTimeMs).coerceAtLeast(0f)
-        return width.toFloat() - elapsed * pxPerMs
+    /**
+     * 运动域滚动位置：只认 ΔT = [motionNs] − [motionStartNs]，不认绝对时刻。
+     *
+     * ⚠️ 禁止用 `item.startTimeMs`（调度域）参与计算 —— 跨域相减会让弹幕整体偏移。
+     * 解耦方案 v0.2：已入场弹幕的位置与播放器位置完全无关。
+     *
+     * Long ns → double → float：保留亚毫秒精度，消除整数 ms 截断的 ±6% 速度摆动。
+     */
+    private fun scrollX(width: Int, motionNs: Long, motionStartNs: Long, pxPerMs: Float): Float {
+        val elapsedMs = ((motionNs - motionStartNs).coerceAtLeast(0L).toDouble() / 1_000_000.0).toFloat()
+        return width.toFloat() - elapsedMs * pxPerMs
     }
 
     private fun buildStyleKey(cfg: DanmakuConfig): String =
@@ -776,8 +785,9 @@ class GlDanmakuView @JvmOverloads constructor(
                 clockState = clockDiag.state,
                 clockDecision = clockDiag.decision,
                 clockSampleAgeMs = clockDiag.sampleAgeMs.toFloat(),
-                clockErrorMs = clockDiag.errorMs.toFloat(),
-                clockCorrectionPercent = clockDiag.correctionPercent.toFloat(),
+                // 解耦方案 v0.2：两域误差/校正值概念已退役（运动时钟自由运行，无治理）。
+                clockErrorMs = 0f,
+                clockCorrectionPercent = 0f,
                 clockEffectiveSpeed = clockDiag.effectiveSpeed.toFloat(),
             )
         // The diagnostics View layer is intentionally refreshed only at 2Hz. Invalidating it at
@@ -936,7 +946,7 @@ class GlDanmakuView @JvmOverloads constructor(
             val e = GlEglHelper()
             if (!e.init(surface)) {
                 if (AppLog.isEnabled) {
-                    AppLog.w(TAG, "EGL init failed → GPU 引擎不可用，等待上层回退 Canvas")
+                    AppLog.w(TAG, "EGL init failed → GPU 弹幕引擎不可用，上层将禁用弹幕层")
                 }
                 e.release()
                 onEglFailed?.invoke()
@@ -994,11 +1004,25 @@ class GlDanmakuView @JvmOverloads constructor(
     private fun renderAndSchedule(frameTimeNanos: Long) {
         if (released || !eglReady || !renderLoopRunning) {
             renderLoopRunning = false
+            Choreographer.getInstance().removeFrameCallback(frameCallback)
             return
         }
         // 先注册下一拍，让 DisplayEventReceiver 在本帧 GL 工作期间也能接收下一次 vsync；
         // 旧实现渲染结束后才注册，稍晚就会直接落到下下个 vsync。
-        Choreographer.getInstance().postFrameCallback(frameCallback)
+        //
+        // ⚠️ 必须 remove + post：Choreographer 对同一 callback 不去重，若队列里残留了
+        // 旧注册（见下"循环启停竞态"），同一 vsync 会触发两次 doFrame → 同一时刻提交
+        // 两个 buffer → BufferQueue 被双倍速灌入 → 呈现节奏被搅乱 → 弹幕"一抖一抖"。
+        // remove+post 使注册数在每帧收敛到恰好 1 个（自愈）。
+        //
+        // 循环启停竞态：doRenderFrame 末尾在 `!isPlaying && !playWhenReady` 时置
+        // renderLoopRunning=false，但本帧开头已排队的 callback 无法撤回；此时主线程
+        // 100ms 采样发现 isPlaying 恢复 → requestRenderFrame → startRenderLoopIfNeeded
+        // 再 post 一个 → 队列 2 个，且此后每帧各自续 post，永久翻倍。
+        Choreographer.getInstance().apply {
+            removeFrameCallback(frameCallback)
+            postFrameCallback(frameCallback)
+        }
         try {
             doRenderFrame(frameTimeNanos)
         } catch (t: Throwable) {
@@ -1045,6 +1069,8 @@ class GlDanmakuView @JvmOverloads constructor(
             PresentationTimestampResolver.resolve(expectedPresentationTimeNs, frameTimeNanos)
 
         val frameId = uiFrameId.incrementAndGet()
+        // 先 peek seek 目标（调度域要用），必须在下方 advanceContinuousClock 消费（getAndSet）之前。
+        val pendingSeekMsForSchedule = pendingSeekPositionMs.get()
         // CONTINUOUS 输出纳秒；LEGACY 输出整数 ms，这里统一 *1e6 转 ns 对齐 stepTime。
         val smoothPosNs: Long =
             if (clockMode == DanmakuClockMode.CONTINUOUS) {
@@ -1061,8 +1087,21 @@ class GlDanmakuView @JvmOverloads constructor(
                     }
                 timer.step(System.nanoTime(), rawPos, isPlaying, speed, seekSerial.get()) * 1_000_000L
             }
-        engine.stepTime(smoothPosNs, frameId)
+        // ---- 调度域：播放器真值投影（Schedule Clock）----
+        // 决定"弹幕何时出现"，与运动完全解耦（解耦方案 v0.2）。
+        // seek 帧：直接取 seek 目标，保证时间线游标与场景重建和运动侧一致。
+        // LEGACY：两域重合，行为与改造前逐字节一致。
+        val scheduleNowMs: Long =
+            if (clockMode == DanmakuClockMode.LEGACY) {
+                smoothPosNs / 1_000_000L
+            } else if (pendingSeekMsForSchedule >= 0L) {
+                pendingSeekMsForSchedule
+            } else {
+                projectSample(sampled.sample, presentationTimeNs) / 1_000_000L
+            }
+        engine.stepTime(scheduleNowMs = scheduleNowMs, motionNowNs = smoothPosNs, uiFrameId = frameId)
         cacheManager.drainReleasedBitmaps(frameId)
+        detectMotionJump(smoothPosNs, scheduleNowMs, isPlaying)
 
         // Action 线程执行调度（下一帧生效；去重避免积压）。
         actionHandler.removeMessages(MSG_ACT)
@@ -1079,6 +1118,9 @@ class GlDanmakuView @JvmOverloads constructor(
             r.beginFrame()
             e.swapBuffers()
             renderLoopRunning = false
+            // 撤回本帧开头已排队的下一拍，否则队列残留 callback 会在下次
+            // startRenderLoopIfNeeded 时与新注册叠加成双重 doFrame。
+            Choreographer.getInstance().removeFrameCallback(frameCallback)
             return
         }
 
@@ -1088,8 +1130,9 @@ class GlDanmakuView @JvmOverloads constructor(
 
         val snapshot = engine.acquireRenderSnapshot()
         try {
-            // 亚毫秒浮点时间：消除整数 ms 截断导致的 60Hz 步进抖动。
-            val nowMs = (smoothPosNs.toDouble() / 1_000_000.0).toFloat()
+            // 运动域当前时刻（纳秒，亚毫秒）。已入场弹幕的位置只依赖 ΔT，
+            // 与播放器位置 / 调度域 scheduleNowMs 完全无关（解耦方案 v0.2）。
+            val motionNsForDraw = smoothPosNs
             val alpha = (cfg.opacity * 255f).roundToInt().coerceIn(0, 255) / 255f
             for (i in 0 until snapshot.count) {
                 val item = snapshot.items[i] ?: continue
@@ -1100,7 +1143,7 @@ class GlDanmakuView @JvmOverloads constructor(
                 val h = slot.height.toFloat()
                 val x =
                     when (item.kind) {
-                        DanmakuKind.SCROLL -> scrollX(vw, nowMs, item.startTimeMs, item.pxPerMs)
+                        DanmakuKind.SCROLL -> scrollX(vw, motionNsForDraw, item.motionStartNs, item.pxPerMs)
                         DanmakuKind.TOP, DanmakuKind.BOTTOM -> ((vw - w) * 0.5f).coerceAtLeast(0f)
                     }
                 // 完全滚出屏幕的弹幕跳过（不写实例、不浪费 draw）。
@@ -1115,9 +1158,12 @@ class GlDanmakuView @JvmOverloads constructor(
             engine.releaseRenderSnapshot(snapshot)
         }
 
-        // 不再调用 e.setPresentationTime(presentationTimeNs)：frameTimeNanos 是「当前 vsync 时刻」，
-        // swap 发生在它之后 6~9ms，等于每次塞给 SurfaceFlinger 一个过期时间戳，可能干扰合成队列、
-        // 诱发偶发 swap 阻塞。移除后走 SurfaceFlinger 默认（下一个 vsync 呈现），位置计算不受影响。
+        // ---- 呈现时刻 ----
+        // 实测：显式 eglPresentationTimeANDROID(frameTime + N×vsync) 在本机 TV SoC 上会导致
+        // 弹幕"约 1 秒才动一下"（带未来时间戳的 buffer 被驱动压到低频率呈现槽，行为异常）。
+        // 因此**回退**为不设时间戳、由 SurfaceFlinger 按"下一个可用 vsync"呈现。
+        // 弹幕相对运动的平滑依赖 motionNowNs 均匀推进（已由时钟层保证），呈现侧的
+        // 1↔2 帧延迟跳变问题留待真机逐帧测量（perfFrameInterval/perfMaxFrame）确认后再定。
         val swapStartedNs = System.nanoTime()
         val swapSucceeded = e.swapBuffers()
         val swapNs = (System.nanoTime() - swapStartedNs).coerceAtLeast(0L)
@@ -1127,10 +1173,12 @@ class GlDanmakuView @JvmOverloads constructor(
         if (!swapSucceeded) {
             if (!surfaceAvailable || released) {
                 renderLoopRunning = false
+                Choreographer.getInstance().removeFrameCallback(frameCallback)
                 return
             }
-            if (AppLog.isEnabled) AppLog.w(TAG, "eglSwapBuffers failed; switching to Canvas fallback")
+            if (AppLog.isEnabled) AppLog.w(TAG, "eglSwapBuffers failed; notifying host to disable danmaku")
             renderLoopRunning = false
+            Choreographer.getInstance().removeFrameCallback(frameCallback)
             onEglFailed?.invoke()
             return
         }
@@ -1169,11 +1217,9 @@ class GlDanmakuView @JvmOverloads constructor(
                         "active=${r.lastDrawnInstanceCount} snapshot=${snapshot.count} atlasPages=${a.pageCount()} " +
                         "drawCalls=${r.lastDrawCallCount} " +
                         "clock=${clockDiag.state}/${clockDiag.decision} " +
-                        "clockErr=${String.format(Locale.US, "%.2f", clockDiag.errorMs)}ms " +
-                        "corr=${String.format(Locale.US, "%.2f", clockDiag.correctionPercent)}% " +
                         "effectiveSpeed=${String.format(Locale.US, "%.3f", clockDiag.effectiveSpeed)}x " +
                         "sampleAge=${String.format(Locale.US, "%.1f", clockDiag.sampleAgeMs)}ms " +
-                        "reanchor=${clockDiag.reanchorCount} duplicateSkip=${clockDiag.duplicateSampleSkipCount}"
+                        "reanchor=${clockDiag.reanchorCount}"
                 )
             }
             perfAccumFrameNs = 0L
@@ -1188,9 +1234,87 @@ class GlDanmakuView @JvmOverloads constructor(
         }
 
         // 暂停/缓冲：冻结画面，停止连续渲染以省电。
+        // 必须撤回本帧开头已排队的下一拍：否则残留 callback 会在下次
+        // requestRenderFrame 时与新注册叠加成双重 doFrame（每 vsync 两次提交）。
         if (!isPlaying && !playWhenReady) {
             renderLoopRunning = false
+            Choreographer.getInstance().removeFrameCallback(frameCallback)
         }
+    }
+
+    // ---- 运动跳变检测（RenderThread 私有；定位"一抖一抖"的直接证据）----
+    private var jumpPrevMotionNs = Long.MIN_VALUE
+    private var jumpPrevSchedMs = Long.MIN_VALUE
+    private var jumpBaselineNs = 16_666_667L
+    private var jumpLastLogUptimeMs = 0L
+
+    /**
+     * 逐帧检测运动时钟 / 调度时钟的增量异常（解耦方案的验收手段，见方案 §8）。
+     *
+     * 正常播放中 `ΔmotionNs` 应恒等于 vsync 间隔（60Hz≈16.67ms）。任何一帧出现
+     * 「远大于基线（跳变）」「倒退」「调度域与运动域反向」都直接打日志，
+     * 把"抖动"从主观描述变成可定位的事件。
+     *
+     * - `Δmotion` 异常大 → 运动时钟被重锚/跳变（弹幕位置跳，最可能的"抖"源）
+     * - `Δmotion < 0` → 运动时钟回退（滚动倒退）
+     * - `Δsched` 与 `Δmotion` 符号相反且量级大 → 两域异常分离
+     *
+     * 仅在 RenderThread 调用；EMA 基线 + 1s 限频，零分配。
+     */
+    private fun detectMotionJump(motionNs: Long, scheduleMs: Long, isPlaying: Boolean) {
+        val prevMotion = jumpPrevMotionNs
+        jumpPrevMotionNs = motionNs
+        if (prevMotion == Long.MIN_VALUE) return
+        val deltaNs = motionNs - prevMotion
+        if (!isPlaying) {
+            // 暂停/缓冲期冻结属预期，重置基线避免恢复帧误报。
+            jumpBaselineNs = 16_666_667L
+            jumpPrevSchedMs = scheduleMs
+            return
+        }
+        if (deltaNs < 0L) {
+            logMotionJump("BACKWARD", deltaNs, motionNs, scheduleMs, scheduleMs - jumpPrevSchedMs)
+            return
+        }
+        if (deltaNs == 0L) {
+            // 同一 motion 值连续两帧 = 同一 vsync 跑了两次 doFrame（渲染循环双重注册）。
+            // 两次画同一位置，理论无害，但会使 BufferQueue 被双倍速提交、扰乱呈现节奏。
+            logMotionJump("DUPLICATE", deltaNs, motionNs, scheduleMs, scheduleMs - jumpPrevSchedMs)
+            return
+        }
+        // EMA 基线（α≈1/8）：容纳偶尔掉帧，超过 3×基线 + 8ms 视为跳变。
+        jumpBaselineNs = (jumpBaselineNs * 7 + deltaNs) / 8
+        val threshold = jumpBaselineNs * 3 + 8_000_000L
+        if (deltaNs > threshold) {
+            logMotionJump(
+                "JUMP",
+                deltaNs,
+                motionNs,
+                scheduleMs,
+                scheduleMs - jumpPrevSchedMs,
+            )
+        }
+        jumpPrevSchedMs = scheduleMs
+    }
+
+    private fun logMotionJump(
+        kind: String,
+        deltaNs: Long,
+        motionNs: Long,
+        scheduleMs: Long,
+        deltaSchedMs: Long,
+    ) {
+        if (!AppLog.isEnabled) return
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - jumpLastLogUptimeMs < 1_000L) return
+        jumpLastLogUptimeMs = now
+        AppLog.w(
+            TAG,
+            "motion " + kind + " delta=" + String.format(Locale.US, "%.2f", deltaNs / 1e6) +
+                "ms baseline=" + String.format(Locale.US, "%.2f", jumpBaselineNs / 1e6) +
+                "ms motion=" + motionNs / 1_000_000 + "ms sched=" + scheduleMs +
+                "ms deltaSched=" + deltaSchedMs + "ms"
+        )
     }
 
     /**
@@ -1207,11 +1331,12 @@ class GlDanmakuView @JvmOverloads constructor(
         presentationTimeNs: Long,
         sample: MediaClockSample,
     ): Long {
-        val pendingSeekMs = pendingSeekPositionMs.getAndSet(-1L)
+        // Motion Clock 不再消费 seek（解耦方案 v0.2：seek 由 engine 清空重建，
+        // 运动起点由新条目记录，时钟无需对齐）。此处仅复位 seek 标记。
+        pendingSeekPositionMs.set(-1L)
         return clockDriver.advance(
             frameTimeNs = presentationTimeNs,
             sample = sample,
-            pendingSeekMediaNs = if (pendingSeekMs >= 0L) pendingSeekMs * 1_000_000L else null,
         )
     }
 

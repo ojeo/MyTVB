@@ -2,7 +2,6 @@ package com.tutu.myblbl.feature.player.view
 
 import android.content.Context
 import com.tutu.myblbl.R
-import com.tutu.myblbl.feature.player.danmaku.DanmakuRenderMode
 import com.tutu.myblbl.feature.player.settings.AfterPlayMode
 import com.tutu.myblbl.feature.player.LiveLineInfo
 import com.tutu.myblbl.feature.player.LiveQualityInfo
@@ -40,7 +39,6 @@ internal class MyPlayerSettingMenuBuilder(
         val dmAllowBottom: Boolean = false,
         val dmMergeDuplicate: Boolean = true,
         val dmSmartShield: Boolean = true,
-        val dmRenderMode: DanmakuRenderMode = DanmakuRenderMode.GL,
         val screenMirrorEnabled: Boolean = false,
         val afterPlayMode: AfterPlayMode = AfterPlayMode.NEXT_EPISODE,
         val liveQualities: List<LiveQualityInfo> = emptyList(),
@@ -259,8 +257,7 @@ internal class MyPlayerSettingMenuBuilder(
             PlayerSettingRow.Item(MyPlayerSettingView.ITEM_DM_ALLOW_TOP, context.getString(R.string.dm_allow_top), state.dmAllowTop.toOpenCloseLabel()),
             PlayerSettingRow.Item(MyPlayerSettingView.ITEM_DM_ALLOW_BOTTOM, context.getString(R.string.dm_allow_bottom), state.dmAllowBottom.toOpenCloseLabel()),
             PlayerSettingRow.Item(MyPlayerSettingView.ITEM_DM_MERGE_DUPLICATE, context.getString(R.string.dm_merge_duplicate), state.dmMergeDuplicate.toOpenCloseLabel()),
-            PlayerSettingRow.Item(MyPlayerSettingView.ITEM_DM_SMART_SHIELD, context.getString(R.string.dm_smart_shield), state.dmSmartShield.toOpenCloseLabel()),
-            PlayerSettingRow.Item(MyPlayerSettingView.ITEM_DM_RENDER_MODE, "渲染引擎", renderModeLabel(state.dmRenderMode))
+            PlayerSettingRow.Item(MyPlayerSettingView.ITEM_DM_SMART_SHIELD, context.getString(R.string.dm_smart_shield), state.dmSmartShield.toOpenCloseLabel())
         )
     }
 
@@ -322,13 +319,6 @@ internal class MyPlayerSettingMenuBuilder(
                 menuKey = MyPlayerSettingView.ITEM_DM_SMART_SHIELD,
                 title = context.getString(R.string.dm_smart_shield),
                 currentValue = state.dmSmartShield
-            )
-
-            MyPlayerSettingView.ITEM_DM_RENDER_MODE -> buildChoiceMenu(
-                menuKey = MyPlayerSettingView.ITEM_DM_RENDER_MODE,
-                title = "渲染引擎",
-                values = DanmakuRenderMode.values().map(::renderModeLabel),
-                selectedIndex = state.dmRenderMode.ordinal
             )
 
             else -> null
@@ -394,11 +384,6 @@ internal class MyPlayerSettingMenuBuilder(
 
     private fun getAreaDisplay(area: Int): String {
         return DmScreenArea.entries.firstOrNull { it.area == area }?.showName ?: DmScreenArea.Full.showName
-    }
-
-    private fun renderModeLabel(mode: DanmakuRenderMode): String = when (mode) {
-        DanmakuRenderMode.GL -> "GPU"
-        DanmakuRenderMode.CANVAS -> "Canvas"
     }
 
     private fun formatSpeed(speed: Float): String {

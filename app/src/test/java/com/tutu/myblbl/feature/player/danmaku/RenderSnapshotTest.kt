@@ -49,19 +49,28 @@ class RenderSnapshotTest {
 
     @Test
     fun firstCacheResultStartsMotionAtReadyTime() {
-        assertEquals(1_240, cacheReadyStartTime(false, currentStartTimeMs = 1_000, nowMs = 1_240))
+        // 运动域：纳秒。未开动 → 重锚到"此刻"，入场到就绪的等待不计入运动时长。
+        assertEquals(
+            1_240_000_000L,
+            cacheReadyMotionStartNs(false, currentStartNs = 1_000_000_000L, nowNs = 1_240_000_000L),
+        )
     }
 
     @Test
     fun styleCacheRebuildDoesNotRestartExistingMotion() {
-        assertEquals(1_000, cacheReadyStartTime(true, currentStartTimeMs = 1_000, nowMs = 1_240))
+        // 已开动（预取命中）→ 保持原运动起点。
+        assertEquals(
+            1_000_000_000L,
+            cacheReadyMotionStartNs(true, currentStartNs = 1_000_000_000L, nowNs = 1_240_000_000L),
+        )
     }
 
     @Test
     fun itemWaitingForCacheEventuallyReleasesItsLane() {
-        assertFalse(isCacheWaitExpired(false, admittedAtMs = 1_000, nowMs = 2_599, timeoutMs = 1_600))
-        assertTrue(isCacheWaitExpired(false, admittedAtMs = 1_000, nowMs = 2_600, timeoutMs = 1_600))
-        assertFalse(isCacheWaitExpired(true, admittedAtMs = 1_000, nowMs = 9_000, timeoutMs = 1_600))
+        // 运动域：入参是已等待时长（ms），不再是绝对时刻。
+        assertFalse(isCacheWaitExpired(false, elapsedMs = 1_599, timeoutMs = 1_600))
+        assertTrue(isCacheWaitExpired(false, elapsedMs = 1_600, timeoutMs = 1_600))
+        assertFalse(isCacheWaitExpired(true, elapsedMs = 9_000, timeoutMs = 1_600))
     }
 
     @Test

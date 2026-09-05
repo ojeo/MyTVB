@@ -25,11 +25,22 @@ internal interface DanmakuEngineMainApi {
 
     fun lastDrawCacheMissSkippedCount(): Int
 
-    /** 写入当前连续媒体时间（纳秒）。内部拆成整数 ms 调度 + 亚毫秒渲染位置。 */
-    fun stepTime(positionNs: Long, uiFrameId: Int)
+    /**
+     * 写入两个**互不换算**的时间（解耦方案 v0.2）：
+     * - [scheduleNowMs] 调度域：播放器媒体时间（ms），来自 `projectSample()` 真值投影。
+     *   只影响"弹幕何时出现"（入场判定 / 时间线游标 / 预取 / 历史清理）。
+     * - [motionNowNs] 运动域：播放期累计时长（ns），由 Motion Clock 自由运行产出，
+     *   pause/buffering 冻结。只影响"已入场弹幕怎么运动"（位置 / 退场 / 轨道碰撞）。
+     *
+     * 两域之间不存在任何换算或对齐关系。唯一交界是入场瞬间记录 `DanmakuItem.motionStartNs`。
+     */
+    fun stepTime(scheduleNowMs: Long, motionNowNs: Long, uiFrameId: Int)
 
-    /** 主线程专用：为合法回退（seek 回看）放行单调高水位。必须与 stepTime 同线程调用。 */
+    /** 主线程专用：为合法回退（seek 回看）放行调度域单调高水位。必须与 stepTime 同线程调用。 */
     fun allowClockBackwardTo(positionMs: Long)
+
+    /** 运动域当前时刻（ns）。仅供渲染与运动判定，禁止用于任何调度判定。 */
+    fun currentMotionNs(): Long
 
     fun drainReleasedBitmaps(uiFrameId: Int)
 
@@ -59,11 +70,24 @@ internal fun shouldApplyBlblCacheResult(
     pendingGeneration == resultGeneration &&
     rendering
 
-internal fun cacheReadyStartTime(motionStarted: Boolean, currentStartTimeMs: Int, nowMs: Int): Int =
-    if (motionStarted) currentStartTimeMs else nowMs
+/**
+ * 缓存就绪时的运动起点重锚（**运动域**）。
+ *
+ * 未开动 → 重锚到"此刻"（入场到就绪的等待不计入运动时长，弹幕从右边缘准时开始滚）；
+ * 已开动 → 保持原起点（预取命中路径在 activate() 时已开动）。
+ */
+internal fun cacheReadyMotionStartNs(motionStarted: Boolean, currentStartNs: Long, nowNs: Long): Long =
+    if (motionStarted) currentStartNs else nowNs
 
-internal fun isCacheWaitExpired(motionStarted: Boolean, admittedAtMs: Int, nowMs: Int, timeoutMs: Int): Boolean =
-    !motionStarted && nowMs - admittedAtMs >= timeoutMs
+/**
+ * 缓存等待是否超时（**运动域**）。
+ *
+ * 解耦方案 v0.2：入场后的等待时长按 Motion Clock 计，与播放器位置无关。
+ * 好处：pause/buffering 期间 Motion Clock 冻结，等待计时同步暂停，
+ * 不会因一次长缓冲把在等图的弹幕整批判死（旧行为依赖播放器位置，语义等价但耦合更紧）。
+ */
+internal fun isCacheWaitExpired(motionStarted: Boolean, elapsedMs: Long, timeoutMs: Int): Boolean =
+    !motionStarted && elapsedMs >= timeoutMs
 
 internal fun adjustedTimelineIndexAfterPrefixTrim(index: Int, droppedCount: Int): Int =
     (index - droppedCount).coerceAtLeast(0)
@@ -102,8 +126,10 @@ internal interface DanmakuEngineActionApi {
 
     fun updateConfig(newConfig: DanmakuConfig)
 
-    fun stepTime(positionNs: Long, uiFrameId: Int)
+    /** 同 [DanmakuEngineMainApi.stepTime]，双时间入参。 */
+    fun stepTime(scheduleNowMs: Long, motionNowNs: Long, uiFrameId: Int)
 
+    /** 调度域当前媒体时间（ms）。 */
     fun currentPositionMs(): Long
 
     fun drainReleasedBitmaps(uiFrameId: Int)
@@ -187,7 +213,10 @@ internal class DanmakuEngine(
     private var lastAdmissionHistoryPruneBeforeMs: Int = 0
 
     // Monotonic time within a session (action thread).
+    /** 调度域：上一帧的 nowMs，用于 REPLAY_BACK_THRESHOLD_MS 回看判定。 */
     private var lastNowMs: Int = 0
+    /** 运动域：上一帧的 motionNs，用于 clockAdvanced（暂停/缓冲时冻结）判定。 */
+    private var lastMotionNs: Long = 0L
 
     // ---- Viewport / Config (action thread writes; main reads) ----
     @Volatile private var viewportWidth: Int = 0
@@ -231,19 +260,46 @@ internal class DanmakuEngine(
     override fun lastDrawCacheMissSkippedCount(): Int = lastDrawCacheMissSkippedCount
 
     // ---- Time (main writes; action reads) ----
-    @Volatile private var currentPositionMs: Long = 0L
-    /** 亚毫秒渲染位置（纳秒）：draw 的 scrollX 用它，消除整数 ms 截断的步进抖动。 */
-    @Volatile private var currentPositionNs: Long = 0L
+    //
+    // 解耦方案 v0.2：两个时钟域**互不换算**，各自服务一个目标。
+    //
+    // ┌─────────────────────────┬──────────────────────────┬────────────────────────────┐
+    // │                         │ scheduleNowMs（调度域）    │ motionNowNs（运动域）       │
+    // ├─────────────────────────┼──────────────────────────┼────────────────────────────┤
+    // │ 语义                     │ 播放器媒体时间（绝对位置） │ 播放期累计时长（相对量）     │
+    // │ 来源                     │ projectSample() 真值投影   │ Motion Clock 自由外推       │
+    // │ 决定                     │ 何时出现                   │ 出现后怎么运动              │
+    // │ 精度要求                 │ 绝对 ±20ms                 │ 速率恒定（绝对值无意义）     │
+    // │ pause/buffering          │ 跟随播放器冻结              │ 由 isPlaying 边沿冻结        │
+    // │ seek                     │ 跳到目标 + 清空重建         │ 不重锚，继续累计             │
+    // └─────────────────────────┴──────────────────────────┴────────────────────────────┘
+    //
+    // 唯一交界：入场瞬间 `item.motionStartNs = motionNowNs`。此后该条弹幕不再依赖播放器位置。
+
+    /** 调度域：播放器媒体时间（ms）。入场判定 / 时间线游标 / 预取 / 历史清理。 */
+    @Volatile private var scheduleNowMs: Long = 0L
+    /** 运动域：播放期累计时长（ns）。位置 / 退场 / 轨道碰撞 / 缓存超时。亚毫秒，draw 直接消费。 */
+    @Volatile private var motionNowNs: Long = 0L
+    /**
+     * act() 帧内统一的运动域时刻（action 线程私有）。act() 开头从 [motionNowNs] 快照一次，
+     * 使同一帧内所有运动判定（退场 / 轨道 / 入场起点）读到同一个值，
+     * 避免渲染线程逐帧写入造成帧内不一致。语义与 [currentUiFrameId] 的帧快照一致。
+     */
+    private var actMotionNs: Long = 0L
     @Volatile private var currentUiFrameId: Int = 0
 
-    // 时钟单调高水位（主线程 stepTime 维护）：位置回退（平滑时钟硬校准/raw 抖动）时
+    // 单调高水位（主线程 stepTime 维护）：位置回退（平滑时钟硬校准/raw 抖动）时
     // 拒绝回退值。此前 act() 用 clamp 后的时钟判退场、draw() 用未 clamp 的原始位置算 x，
     // 时钟回退后两轨分叉 → 条目按"超前时钟"被 prune 时观众看到的位置还在屏中（半路消失）、
     // 或整屏位置倒跳重滚（"同一条弹幕再滚一遍"）。钳制上移到 stepTime 后两轨读同一份数据，
     // 分叉类消失不再可能。合法回退（用户 seek 回看）由 [allowClockBackwardTo] 在主线程放行，
     // 必须与 stepTime 同线程以避免跨线程重置/写入交错把高水位卡在旧位置。
-    @Volatile private var monotonicClockMs: Long = 0L
-    @Volatile private var monotonicClockNs: Long = 0L
+    //
+    // 两域各自持有独立高水位，互不影响。运动域高水位在 [clearActives] 时归零：
+    // 在场条目清空后残留的 motionStartNs 不再有意义，此时允许运动时钟回落到新基线
+    // （切换渲染后端 / 新会话时 Motion Clock 会 reset，若不归零会让新条目的 ΔT 被旧高水位撑爆）。
+    @Volatile private var monotonicScheduleMs: Long = 0L
+    @Volatile private var monotonicMotionNs: Long = 0L
 
     // ---- Render snapshot (double buffer) ----
     private val snapshots = Array(3) { RenderSnapshot() }
@@ -362,30 +418,37 @@ internal class DanmakuEngine(
     private fun sp(v: Float): Float =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, v, displayMetrics)
 
-    override fun stepTime(positionNs: Long, uiFrameId: Int) {
-        val posNs = positionNs.coerceAtLeast(0L)
-        val posMs = posNs / 1_000_000L
-        // 单调钳制：只允许前进。回退（漂移硬校准等）被吸收为"冻结等 raw 追上"，
-        // 而不是位置倒跳。合法回退（用户 seek 回看）走 allowClockBackwardTo 放行。
-        val floorMs = monotonicClockMs
-        val effectiveMs = if (posMs >= floorMs) posMs else floorMs
-        monotonicClockMs = effectiveMs
-        currentPositionMs = effectiveMs
-        // 渲染位置：亚毫秒单调钳制（与整数 ms 版本同源），保证 scrollX 永不倒跳。
-        val floorNs = monotonicClockNs
-        val effectiveNs = if (posNs >= floorNs) posNs else floorNs
-        monotonicClockNs = effectiveNs
-        currentPositionNs = effectiveNs
+    override fun stepTime(scheduleNowMs: Long, motionNowNs: Long, uiFrameId: Int) {
+        // ---- 调度域 ----
+        // 单调钳制：只允许前进。播放器上报抖动被吸收为"冻结"，而不是时间线倒退重放。
+        // 合法回退（用户 seek 回看）走 allowClockBackwardTo 放行。
+        val sMs = scheduleNowMs.coerceAtLeast(0L)
+        val effectiveMs = if (sMs >= monotonicScheduleMs) sMs else monotonicScheduleMs
+        monotonicScheduleMs = effectiveMs
+        this.scheduleNowMs = effectiveMs
+
+        // ---- 运动域 ----
+        // 与调度域完全独立：不做任何换算、不参考 scheduleNowMs。
+        // Motion Clock 本身单调（rate ≥ 0，暂停时冻结），此处的高水位只是防御性兜底：
+        // 切换渲染后端 / 新会话导致时钟回落时，保证已在屏弹幕的 ΔT 不倒退。
+        val mNs = motionNowNs.coerceAtLeast(0L)
+        val effectiveNs = if (mNs >= monotonicMotionNs) mNs else monotonicMotionNs
+        monotonicMotionNs = effectiveNs
+        this.motionNowNs = effectiveNs
+
         currentUiFrameId = uiFrameId
     }
 
     override fun allowClockBackwardTo(positionMs: Long) {
+        // 只放行调度域：时间线回看是合法的时间线级回退。
+        // 运动域不参与——Motion Clock 继续累计，已入场弹幕的运动不因 seek 而被回拉。
         val m = positionMs.coerceAtLeast(0L)
-        monotonicClockMs = m
-        monotonicClockNs = m * 1_000_000L
+        monotonicScheduleMs = m
     }
 
-    override fun currentPositionMs(): Long = currentPositionMs
+    override fun currentMotionNs(): Long = motionNowNs
+
+    override fun currentPositionMs(): Long = scheduleNowMs
 
     override fun drainReleasedBitmaps(uiFrameId: Int) {
         cacheManager.drainReleasedBitmaps(uiFrameId)
@@ -423,8 +486,9 @@ internal class DanmakuEngine(
             // 在场条目建图失败（内存不足/位图被回收）：重新排队重试，避免直接掉进超时丢弃。
             // 加退避：预算耗尽时每帧重试只会反复失败（实测刷数百条 FAIL 日志），
             // 退避让位图池有时间被释放路径回填。
+            // 退避基准是调度域：它与 requestCacheBuilds 的 nowMsForRetry 同域（均来自 scheduleNowMs）。
             item.cacheRetryNotBeforeMs =
-                currentPositionMs.coerceAtMost((Int.MAX_VALUE - CACHE_FAIL_RETRY_BACKOFF_MS).toLong()).toInt() +
+                scheduleNowMs.coerceAtMost((Int.MAX_VALUE - CACHE_FAIL_RETRY_BACKOFF_MS).toLong()).toInt() +
                     CACHE_FAIL_RETRY_BACKOFF_MS
             if (item.inActive) uncachedActive.addLast(item)
             // entry 为空=内存不足建图失败；tryAcquire 失败=bitmap已被回收。
@@ -439,20 +503,29 @@ internal class DanmakuEngine(
         }
         val old = item.cacheEntry
         if (item.inActive && !item.motionStarted) {
-            val prevStart = item.startTimeMs
-            item.startTimeMs = cacheReadyStartTime(
+            // 缓存就绪 → 运动起点重锚到"此刻"。入场到就绪之间的等待不该计入运动时长，
+            // 否则弹幕第一次出现时已经滚进屏幕一截。
+            //
+            // ⚠️ 必须写 motionStartNs（运动域）。若误写 startTimeMs（调度域），该条弹幕的
+            // ΔT 会被跨域相减 → 位置瞬间跳变。
+            val prevStartMs = item.startTimeMs
+            val prevStartNs = item.motionStartNs
+            val readyMotionNs = motionNowNs
+            item.motionStartNs = cacheReadyMotionStartNs(
                 motionStarted = false,
-                currentStartTimeMs = item.startTimeMs,
-                nowMs = currentPositionMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                currentStartNs = item.motionStartNs,
+                nowNs = readyMotionNs,
             )
+            item.startTimeMs = scheduleNowMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
             item.motionStarted = true
-            // 缓存就绪，startTimeMs 重锚到当前播放位置。admit→ready 的等待时长若接近 MAX_CACHE_WAIT_MS，
-            // 说明缓存构建接近超时边缘，下一步可能被 pruneExpired 误杀。
+            // admit→ready 的等待时长若接近 MAX_CACHE_WAIT_MS，说明缓存构建接近超时边缘，
+            // 下一步可能被 pruneExpired 误杀。
             if (AppLog.isEnabled) {
                 AppLog.w(
                     TAG,
                     "cacheReady t=${item.timeMs()}ms text='${item.data.text.take(12)}' " +
-                        "admit=${prevStart}ms→start=${item.startTimeMs}ms waited=${item.startTimeMs - prevStart}ms lane=${item.lane}"
+                        "admit=${prevStartMs}ms→start=${item.startTimeMs}ms waited=${item.startTimeMs - prevStartMs}ms " +
+                        "waitedNs=${(readyMotionNs - prevStartNs) / 1_000_000}ms lane=${item.lane}"
                 )
             }
         }
@@ -513,7 +586,9 @@ internal class DanmakuEngine(
             }
 
             val outlinePad = outlinePadPx
-            val rawNowMs = currentPositionMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+
+            // ---- 调度域 now：语义与改造前完全一致（播放器媒体时间） ----
+            val rawNowMs = scheduleNowMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
             // 位置单调化：小幅回退（播放器上报抖动）钳制不回退，保证滚动不倒退；
             // 大幅回退（超过 REPLAY_BACK_THRESHOLD_MS，如起播时续播位置残留被真实位置覆盖）
             // 必须跟随，否则引擎时间被锁死在旧位置——滚动弹幕全部定位在右边缘外不可见、
@@ -523,9 +598,14 @@ internal class DanmakuEngine(
             } else {
                 lastNowMs
             }
-            // 弹幕时钟有前进 ≈ 正在播放（暂停/缓冲时时钟冻结），供自适应上限判定用。
-            val clockAdvanced = nowMs != lastNowMs
             lastNowMs = nowMs
+
+            // ---- 运动域 now：帧内快照一次，供本帧所有运动判定共用 ----
+            // Motion Clock 在 pause/buffering 时冻结，因此"运动时钟有前进"≈"正在播放"。
+            val motionNs = motionNowNs
+            actMotionNs = motionNs
+            val clockAdvanced = motionNs != lastMotionNs
+            lastMotionNs = motionNs
 
             val topInset = viewportTopInsetPx.coerceIn(0, height)
             val bottomInset = viewportBottomInsetPx.coerceIn(0, height - topInset)
@@ -584,6 +664,9 @@ internal class DanmakuEngine(
                     topInset = topInset,
                     maxYTop = maxYTop,
                     reason = rebuildReason ?: "rebuildFlag",
+                    // viewport / config / geometry / 时间线替换必须保住在场弹幕，
+                    // 否则改一次字号就整屏清空（"滚到一半消失"）。seek 清空走 seekTo()。
+                    clearActive = false,
                 )
             } else {
                 pruneExpired(width = width, nowMs = nowMs)
@@ -650,7 +733,7 @@ internal class DanmakuEngine(
         val snapshot = acquireRenderSnapshot()
         return try {
             RenderSnapshotStats(
-                positionMs = currentPositionMs,
+                positionMs = scheduleNowMs,
                 count = snapshot.count,
                 pendingCount = snapshot.pendingCount,
                 nextAtMs = snapshot.nextAtMs,
@@ -677,9 +760,12 @@ internal class DanmakuEngine(
         bitmapPaint.alpha = opacityAlpha
         val styleGen = cacheStyleGeneration
         val width = viewportWidth.coerceAtLeast(0)
-        // 亚毫秒浮点时间：整数 ms 截断会把 60Hz 每帧 16.67ms 量化成 16/17ms 交替，
+        // 运动域当前时刻（纳秒，亚毫秒）。
+        // 整数 ms 截断会把 60Hz 每帧 16.67ms 量化成 16/17ms 交替，
         // 滚动位移周期性摆动（约 ±6% 速度波动，视觉"一顿一顿"）。用 ns 换算保留亚毫秒精度。
-        val nowMs = (currentPositionNs.toDouble() / 1_000_000.0).toFloat()
+        //
+        // ⚠️ 只认 Motion Clock：已入场弹幕的位置与播放器位置无关（解耦方案 v0.2）。
+        val motionNs = motionNowNs
 
         var cachedDrawn = 0
         var cacheMissSkipped = 0
@@ -690,12 +776,18 @@ internal class DanmakuEngine(
         var missMotionWait = 0
         for (i in 0 until snapshot.count) {
             val item = snapshot.items[i] ?: continue
-            // x 坐标在主线程 draw 时现算（用 draw 当前的 nowMs），保证滚动位置与画面同步。
-            // 此前曾在 act 线程预算填入 snapshot.x，但 act 线程的 nowMs 滞后于 draw，
+            // x 坐标在主线程 draw 时现算（用 draw 当时的运动域时刻），保证滚动位置与画面同步。
+            // 此前曾在 act 线程预算填入 snapshot.x，但 act 线程的时刻滞后于 draw，
             // 导致弹幕位置抖动/卡顿。对齐参考实现（blbl.cat3399）。
+            //
+            // ΔT 只由 Motion Clock 与入场时记录的 motionStartNs 决定（解耦方案 v0.2）。
             val x =
                 when (item.kind) {
-                    DanmakuKind.SCROLL -> scrollX(width = width, nowMs = nowMs, startTimeMs = item.startTimeMs, pxPerMs = item.pxPerMs)
+                    DanmakuKind.SCROLL -> scrollX(
+                        width = width,
+                        elapsedMs = ((motionNs - item.motionStartNs).coerceAtLeast(0L).toDouble() / 1_000_000.0).toFloat(),
+                        pxPerMs = item.pxPerMs,
+                    )
                     DanmakuKind.TOP -> centerX(width = width, contentWidth = item.textWidthPx)
                     DanmakuKind.BOTTOM -> centerX(width = width, contentWidth = item.textWidthPx)
                 }
@@ -740,7 +832,7 @@ internal class DanmakuEngine(
                     "draw miss(agg ${DRAW_MISS_LOG_INTERVAL_MS}ms) frames=$drawMissLogFrames " +
                         "miss=$drawMissLogSkipped wait=$drawMissLogWait noEntry=$drawMissLogNoEntry " +
                         "recycled=$drawMissLogRecycled genMismatch=$drawMissLogGenMismatch " +
-                        "gen=$styleGen now=${nowMs}ms"
+                        "gen=$styleGen schedNow=${scheduleNowMs}ms motion=${motionNs / 1_000_000}ms"
                 )
                 drawMissLogLastAtMs = nowUptimeMs
                 drawMissLogFrames = 0
@@ -803,7 +895,7 @@ internal class DanmakuEngine(
      */
     private fun markMatchedNewItemsConsumed(newItems: List<DanmakuItem>) {
         if (active.isEmpty()) return
-        val nowMs = currentPositionMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        val nowMs = scheduleNowMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         val floorMs = (
             nowMs - maxOf(computeRollingDurationMs(config.speedLevel), FIXED_DURATION_MS)
             ).coerceAtLeast(0)
@@ -851,7 +943,7 @@ internal class DanmakuEngine(
         val rollingDurationMs = computeRollingDurationMs(config.speedLevel)
         val patchFrom = resolveOutOfOrderAppendPatchStartMs(
             firstIncomingTimeMs = firstIncoming,
-            currentPositionMs = currentPositionMs,
+            currentPositionMs = scheduleNowMs,
             rollingDurationMs = rollingDurationMs,
         )
         val replaceIndex = lowerBound(patchFrom)
@@ -991,7 +1083,7 @@ internal class DanmakuEngine(
         index = (index - start).coerceIn(0, items.size)
         prefetchCursor = (prefetchCursor - start).coerceIn(0, items.size)
         requestRebuild("trim-range")
-        seekTo(currentPositionMs, reason = "trim-range")
+        seekTo(scheduleNowMs, reason = "trim-range")
         }
     }
 
@@ -1022,6 +1114,9 @@ internal class DanmakuEngine(
                 topInset = configuredTopInsetPx,
                 maxYTop = configuredMaxYTopPx.coerceAtLeast(configuredTopInsetPx.toFloat()),
                 reason = reason,
+                // seek：屏上弹幕的滚动进度与新位置无关，清空重建。
+                // 解耦后两个时钟无需对齐，清空比"跨域判断哪些保留"更稳。
+                clearActive = true,
             )
             publishSnapshotIfDirty(pos)
         }
@@ -1055,6 +1150,11 @@ internal class DanmakuEngine(
             a.inActive = false
             releaseItemCache(a, releaseAtFrameId = releaseAt)
         }
+        // 在场条目已清空：残留的 motionStartNs 不再有意义。允许运动域高水位回落到新基线，
+        // 否则切换渲染后端 / 新会话时 Motion Clock reset 到 0，旧高水位会把新条目的 ΔT
+        // 撑到巨大 → 立即全部退场（运动域特有的坑，调度域没有这个问题）。
+        monotonicMotionNs = 0L
+        lastMotionNs = 0L
         snapshotDirty = true
     }
 
@@ -1182,6 +1282,15 @@ internal class DanmakuEngine(
         topInset: Int,
         maxYTop: Float,
         reason: String,
+        /**
+         * 是否清空在场弹幕后再重建。
+         * - `true`（**仅 seek 路径**）：弹幕已在屏的进度与新的播放位置无关，全部丢弃重建。
+         *   解耦方案 v0.2 后运动只依赖 `motionStartNs`，seek 时两个时钟无需对齐，
+         *   清空重建比"跨域判断哪些该保留"更不容易出错。
+         * - `false`（viewport / config / geometry / 时间线替换）：**必须保留**在场弹幕，
+         *   否则用户改一次字号或弹幕区域就会整屏清空、在滚的弹幕"滚到一半消失"。
+         */
+        clearActive: Boolean,
     ) {
         val activeBefore = active.size
         // 位置倒退（用户 seek 回更早位置）时允许把 consumed 标记的条目重新入场（回看本来就是重放）；
@@ -1207,6 +1316,11 @@ internal class DanmakuEngine(
         ensureLaneBuffers(laneCount)
         rebuildRequested = false
         lastNowMs = nowMs
+        if (clearActive && active.isNotEmpty()) {
+            // seek：屏上弹幕的滚动进度对新位置毫无意义，整体丢弃后按新位置重建。
+            clearActives()
+            resetLaneState()
+        }
         if (width <= 0 || laneCount <= 0) {
             clearActives()
             resetLaneState()
@@ -1350,7 +1464,7 @@ internal class DanmakuEngine(
                 snapshotDirty = true
                 continue
             }
-            if (expireReason(a, width = width, nowMs = nowMs) != null) {
+            if (expireReason(a, width = width) != null) {
                 droppedExpired++
                 a.inActive = false
                 releaseItemCache(a, releaseAtFrameId = releaseAt)
@@ -1408,7 +1522,7 @@ internal class DanmakuEngine(
         val releaseAt = currentUiFrameId + 1
         for (read in 0 until size) {
             val a = active[read]
-            val reason = expireReason(a, width = width, nowMs = nowMs)
+            val reason = expireReason(a, width = width)
             if (reason != null) {
                 // cacheWaitTimeout = 缓存超时丢弃（弹幕从未可见），是"半路消失"的可疑来源，单独详记。
                 if (reason == "cacheWaitTimeout") {
@@ -1416,20 +1530,22 @@ internal class DanmakuEngine(
                         AppLog.w(
                             TAG,
                             "pruneExpired DROP cacheTimeout t=${a.timeMs()}ms text='${a.data.text.take(12)}' " +
-                                "start=${a.startTimeMs}ms now=${nowMs}ms age=${nowMs - a.startTimeMs}ms " +
+                                "startMs=${a.startTimeMs}ms schedNow=${nowMs}ms " +
+                                "ageMotion=${motionElapsedMs(a).toInt()}ms " +
                                 "motion=${a.motionStarted} lane=${a.lane} dur=${a.durationMs}ms"
                         )
                     }
                 } else if (reason == "duration" && a.kind == DanmakuKind.SCROLL) {
                     // duration 退场时 x 理应 ≈ -textWidth（刚好完全出屏）。
                     // x 还在屏幕右侧 25% 区域内就到期 = "滚到一半消失"的直接现场：
-                    // 要么 startTimeMs 被位置前跳拉大（elapsed 虚增），要么 durationMs 算短了。
-                    val x = scrollX(width = width, nowMs = nowMs.toFloat(), startTimeMs = a.startTimeMs, pxPerMs = a.pxPerMs)
+                    // 要么 ΔT 虚增（motionStartNs 被重锚到更早值），要么 durationMs 算短了。
+                    val elapsedMs = motionElapsedMs(a)
+                    val x = scrollX(width = width, elapsedMs = elapsedMs, pxPerMs = a.pxPerMs)
                     if (x + a.textWidthPx > width * 0.25f && AppLog.isEnabled) {
                         AppLog.w(
                             TAG,
                             "pruneExpired EARLY-EXIT t=${a.timeMs()}ms text='${a.data.text.take(12)}' " +
-                                "start=${a.startTimeMs}ms now=${nowMs}ms elapsed=${nowMs - a.startTimeMs}ms " +
+                                "startMs=${a.startTimeMs}ms schedNow=${nowMs}ms elapsed=${elapsedMs.toInt()}ms " +
                                 "dur=${a.durationMs}ms x=${x.toInt()}px tailX=${(x + a.textWidthPx).toInt()}px width=${width}px"
                         )
                     }
@@ -1676,7 +1792,7 @@ internal class DanmakuEngine(
             )
         for (lane in 0 until laneCount) {
             val prev = laneLastScroll[lane]
-            if (prev != null && isExpired(prev, width = width, nowMs = nowMs)) {
+            if (prev != null && isExpired(prev, width = width)) {
                 laneLastScroll[lane] = null
             }
             val rear = laneLastScroll[lane]
@@ -1689,13 +1805,14 @@ internal class DanmakuEngine(
                     pxPerMs = pxNew,
                     durationMs = durationMs,
                     startTimeMs = nowMs,
+                    motionStartNs = actMotionNs,
                     layoutTopPx = (topInset.toFloat() + laneHeight * lane).coerceAtMost(maxYTop),
                 )
                 laneLastScroll[lane] = item
                 return true
             }
-            val tailPrev = scrollX(width = width, nowMs = nowMs.toFloat(), startTimeMs = rear.startTimeMs, pxPerMs = rear.pxPerMs) + rear.textWidthPx
-            if (isScrollLaneAvailable(width.toFloat(), nowMs, rear, tailPrev, pxNew, marginPx)) {
+            val tailPrev = scrollX(width = width, elapsedMs = motionElapsedMs(rear), pxPerMs = rear.pxPerMs) + rear.textWidthPx
+            if (isScrollLaneAvailable(width.toFloat(), rear, tailPrev, pxNew, marginPx)) {
                 activate(
                     item = item,
                     kind = DanmakuKind.SCROLL,
@@ -1704,6 +1821,7 @@ internal class DanmakuEngine(
                     pxPerMs = pxNew,
                     durationMs = durationMs,
                     startTimeMs = nowMs,
+                    motionStartNs = actMotionNs,
                     layoutTopPx = (topInset.toFloat() + laneHeight * lane).coerceAtMost(maxYTop),
                 )
                 laneLastScroll[lane] = item
@@ -1732,7 +1850,7 @@ internal class DanmakuEngine(
             }
         for (lane in 0 until laneCount) {
             val prev = lanes[lane]
-            if (prev != null && isExpired(prev, width = viewportWidth, nowMs = nowMs)) {
+            if (prev != null && isExpired(prev, width = viewportWidth)) {
                 lanes[lane] = null
             }
             if (lanes[lane] != null) continue
@@ -1744,6 +1862,7 @@ internal class DanmakuEngine(
                 pxPerMs = 0f,
                 durationMs = durationMs,
                 startTimeMs = nowMs,
+                motionStartNs = actMotionNs,
                 layoutTopPx =
                     when (kind) {
                         DanmakuKind.TOP -> (topInset.toFloat() + laneHeight * lane).coerceAtMost(maxYTop)
@@ -1774,7 +1893,8 @@ internal class DanmakuEngine(
 
         // ---- 1) 在场未缓存条目（最老等待者优先）----
         // scanBudget 限定单帧扫描圈数：退避未到期的条目放回队尾，避免空转循环。
-        val nowMsForRetry = currentPositionMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        // 调度域：与 cacheRetryNotBeforeMs 同域。
+        val nowMsForRetry = scheduleNowMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         var scanBudget = uncachedActive.size
         while (uncachedActive.isNotEmpty() && requested < MAX_CACHE_REQUESTS_PER_FRAME && scanBudget-- > 0) {
             if (cacheManager.queueDepth() >= MAX_CACHE_QUEUE_DEPTH) return
@@ -1793,7 +1913,8 @@ internal class DanmakuEngine(
         // ---- 2) 时间线预取（独立预算，不与在场条目抢占）----
         if (prefetchCursor < index) prefetchCursor = index
         if (prefetchCursor > items.size) prefetchCursor = items.size
-        val nowMs = currentPositionMs.coerceAtMost(Int.MAX_VALUE.toLong() - PREFETCH_WINDOW_MS).toInt()
+        // 调度域：预取面向"未来将入场的条目"，必须按播放器媒体时间判断，与入场判定同域。
+        val nowMs = scheduleNowMs.coerceAtMost(Int.MAX_VALUE.toLong() - PREFETCH_WINDOW_MS).toInt()
         val prefetchDeadlineMs = nowMs + PREFETCH_WINDOW_MS
         var prefetchRequested = 0
         while (prefetchCursor < items.size && prefetchRequested < MAX_PREFETCH_REQUESTS_PER_FRAME) {
@@ -1889,62 +2010,69 @@ internal class DanmakuEngine(
         }
     }
 
+    /**
+     * 运动域经过时长（毫秒，浮点保留亚毫秒）。
+     *
+     * 解耦方案 v0.2 的唯一运动时间来源：**只依赖 Motion Clock 与入场时记录的
+     * [DanmakuItem.motionStartNs]，完全不读播放器位置**。
+     * 由 act() 帧快照 [actMotionNs] 驱动，保证同一帧内所有运动判定读到同一个值。
+     */
+    private fun motionElapsedMs(item: DanmakuItem): Float =
+        ((actMotionNs - item.motionStartNs).coerceAtLeast(0L).toDouble() / 1_000_000.0).toFloat()
+
     private fun isExpired(
         item: DanmakuItem,
         width: Int,
-        nowMs: Int,
-    ): Boolean = expireReason(item, width, nowMs) != null
+    ): Boolean = expireReason(item, width) != null
 
     /**
      * 返回过期原因，null 表示未过期。拆出来是为了让 pruneExpired 的日志能区分：
      * - cacheWaitTimeout：缓存等待超时（MAX_CACHE_WAIT_MS 内没拿到缓存）→ 弹幕从未可见就被丢
      * - duration：已运动满 durationMs（正常退场）
      * - scrolledOut：滚动弹幕已完全离开屏幕左侧（正常退场）
+     *
+     * 全部判定均落在**运动域**（[motionElapsedMs]）。
      */
     private fun expireReason(
         item: DanmakuItem,
         width: Int,
-        nowMs: Int,
     ): String? {
+        val elapsedMs = motionElapsedMs(item)
         if (isCacheWaitExpired(
                 motionStarted = item.motionStarted,
-                admittedAtMs = item.startTimeMs,
-                nowMs = nowMs,
+                elapsedMs = elapsedMs.toLong(),
                 timeoutMs = MAX_CACHE_WAIT_MS,
             )) {
             return "cacheWaitTimeout"
         }
         if (!item.motionStarted) return null
-        val elapsed = nowMs - item.startTimeMs
-        if (elapsed >= item.durationMs) return "duration"
+        if (elapsedMs >= item.durationMs) return "duration"
         if (item.kind != DanmakuKind.SCROLL) return null
-        return if (scrollX(width = width, nowMs = nowMs.toFloat(), startTimeMs = item.startTimeMs, pxPerMs = item.pxPerMs) + item.textWidthPx < 0f) {
+        return if (scrollX(width = width, elapsedMs = elapsedMs, pxPerMs = item.pxPerMs) + item.textWidthPx < 0f) {
             "scrolledOut"
         } else {
             null
         }
     }
 
-    private fun scrollX(width: Int, nowMs: Float, startTimeMs: Int, pxPerMs: Float): Float {
-        val elapsed = (nowMs - startTimeMs).coerceAtLeast(0f)
-        return width.toFloat() - elapsed * pxPerMs
-    }
+    /** 运动域滚动位置：只认"已运动时长"，不认绝对时刻。 */
+    private fun scrollX(width: Int, elapsedMs: Float, pxPerMs: Float): Float =
+        width.toFloat() - elapsedMs * pxPerMs
 
     private fun isScrollLaneAvailable(
         width: Float,
-        nowMs: Int,
         front: DanmakuItem,
         tailPrev: Float,
         pxNew: Float,
         marginPx: Float,
     ): Boolean {
+        val frontElapsedMs = motionElapsedMs(front)
         // 尚未有可绘制缓存的前一条弹幕仍占用轨道；但等缓存超过 CACHE_BLOCK_LANE_TIMEOUT_MS
         // 仍不放行会堵死整条轨道，超时后允许后车跟入。
         if (!front.motionStarted) {
-            if (nowMs - front.startTimeMs < CACHE_BLOCK_LANE_TIMEOUT_MS) return false
+            if (frontElapsedMs < CACHE_BLOCK_LANE_TIMEOUT_MS) return false
         }
-        val elapsedPrev = nowMs - front.startTimeMs
-        val prevRemaining = front.durationMs - elapsedPrev
+        val prevRemaining = front.durationMs - frontElapsedMs
         if (prevRemaining <= 0) return true
         if (tailPrev + marginPx > width) return false
         val pxPrev = front.pxPerMs
@@ -1961,7 +2089,10 @@ internal class DanmakuEngine(
         textWidth: Float,
         pxPerMs: Float,
         durationMs: Int,
+        /** 调度域入场时刻（诊断/日志用，不参与运动计算）。 */
         startTimeMs: Int,
+        /** 运动域起点（ns）。入场瞬间记录，此后该条弹幕的运动只依赖它。 */
+        motionStartNs: Long,
         layoutTopPx: Float,
     ) {
         item.kind = kind
@@ -1970,9 +2101,10 @@ internal class DanmakuEngine(
         item.pxPerMs = pxPerMs
         item.durationMs = durationMs
         item.startTimeMs = startTimeMs
+        item.motionStartNs = motionStartNs
         item.layoutTopPx = layoutTopPx
         item.inActive = true
-        // 预取命中：入场即有可用缓存，直接开始运动——startTimeMs 即入场时刻，
+        // 预取命中：入场即有可用缓存，直接开始运动——motionStartNs 即入场时刻（运动域），
         // 弹幕从右侧准时入场，跳过"等缓存→重锚→迟到入场"的整段延迟。
         if (hasValidCache(item, cacheStyleGeneration)) {
             item.motionStarted = true

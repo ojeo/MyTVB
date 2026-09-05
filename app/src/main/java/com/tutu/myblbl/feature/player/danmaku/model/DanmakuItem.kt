@@ -40,7 +40,22 @@ internal class DanmakuItem(
      * 替代 O(n) 的 `item in active` 线性扫描（applyCacheResult/rebuildScene 每帧/每条都会查）。
      */
     var inActive: Boolean = false
+    /**
+     * 调度域入场时刻（毫秒）。**仅供日志/诊断**，不参与任何运动计算。
+     * 时间语义见 danmaku/clock 解耦方案：Schedule Clock 决定"何时出现"。
+     */
     @Volatile var startTimeMs: Int = 0
+
+    /**
+     * 运动域起点（纳秒）。入场（或缓存就绪重锚）时写入，此后该条弹幕的
+     * 位置 / 退场 / 轨道碰撞全部只依赖 `motionNowNs - motionStartNs`，
+     * **彻底不再读取播放器位置**。
+     *
+     * 用纳秒而非毫秒：使 draw（亚毫秒）与退场判定使用完全相同的 ΔT，
+     * 消除此前 Int 毫秒带来的 ≤1ms（约 0.37px）两轨偏差。
+     * 时间语义见 danmaku/clock 解耦方案：Motion Clock 决定"出现后怎么运动"。
+     */
+    @Volatile var motionStartNs: Long = 0L
     @Volatile var motionStarted: Boolean = false
     var durationMs: Int = 0
     var pxPerMs: Float = 0f
