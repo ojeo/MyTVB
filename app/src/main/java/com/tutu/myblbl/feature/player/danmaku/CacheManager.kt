@@ -2,7 +2,9 @@ package com.tutu.myblbl.feature.player.danmaku
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.content.Context
 import android.os.Handler
@@ -10,20 +12,27 @@ import android.os.HandlerThread
 import android.os.Looper
 import android.os.Message
 import android.os.Process
+import androidx.appcompat.content.res.AppCompatResources
+import com.tutu.myblbl.R
 import com.tutu.myblbl.core.common.log.AppLog
+import com.tutu.myblbl.feature.player.danmaku.model.DanmakuInlineSegment
 import com.tutu.myblbl.feature.player.danmaku.model.DanmakuItem
 import com.tutu.myblbl.feature.player.danmaku.model.SharedCacheEntry
 import com.tutu.myblbl.feature.player.danmaku.common.BiliDanmakuStyle
 import com.tutu.myblbl.feature.player.danmaku.common.BitmapMemoryBudget
+import com.tutu.myblbl.feature.player.danmaku.common.DanmakuInlineParser
 import com.tutu.myblbl.feature.player.danmaku.common.VipDanmakuTextureCache
 import com.tutu.myblbl.feature.player.danmaku.common.estimatedArgb8888Bytes
 import com.tutu.myblbl.feature.player.danmaku.common.reclaimUntilBitmapBudgetFits
 import com.tutu.myblbl.feature.player.danmaku.common.resolveDanmakuBitmapBudgetBytes
+import com.tutu.myblbl.feature.player.danmaku.emote.DanmakuEmoteRepository
+import com.tutu.myblbl.feature.player.danmaku.emote.EmoteBitmapLoader
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.ceil
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 internal data class CacheStyle(
     val textSizePx: Float,
@@ -31,6 +40,8 @@ internal data class CacheStyle(
     val strokeWidthPx: Float,
     val outlinePadPx: Float,
     val generation: Int,
+    /** 高赞弹幕头部点赞图标开关（影响烘焙内容，参与样式指纹与解析缓存失效）。 */
+    val showHighLikeIcon: Boolean,
 )
 
 internal data class CacheBuildResult(
@@ -41,16 +52,19 @@ internal data class CacheBuildResult(
 
 internal class CacheManager(
     private val appContext: Context,
-    private val density: Float,
     private val onCacheResult: (CacheBuildResult) -> Unit,
 ) {
     companion object {
         private const val TAG = "DanmakuCache"
 
+        /** 高赞图标着色（对齐 blbl / 官方的高赞弹幕点赞图标金色）。 */
+        private val HIGH_LIKE_ICON_COLOR = Color.parseColor("#F6C343")
+
         private const val MSG_BUILD_CACHE = 2001
         private const val MSG_CLEAR = 2002
         private const val MSG_RELEASE = 2099
         private const val MSG_FLUSH_RELEASED = 2003
+        private const val MSG_RECYCLE_ZERO = 2004
 
         private const val CACHE_POOL_MAX_COUNT: Int = 72
 
@@ -152,6 +166,24 @@ internal class CacheManager(
     }
     private val fontMetrics = Paint.FontMetrics()
 
+    // ---- 内联段（表情/高赞图标）绘制工具（cache 线程专用）----
+    private val emotePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { isFilterBitmap = true }
+    private val emotePlaceholderFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        color = (0x22 shl 24) or 0x000000
+    }
+    private val emotePlaceholderStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        color = (0x66 shl 24) or 0xFFFFFF
+        strokeWidth = max(1f, appContext.resources.displayMetrics.density)
+    }
+    private val emoteRect = RectF()
+    private val inlineLikeIcon by lazy(LazyThreadSafetyMode.NONE) {
+        AppCompatResources.getDrawable(appContext, R.drawable.ic_like)?.mutate()?.apply {
+            setTint(HIGH_LIKE_ICON_COLOR)
+        }
+    }
+
     fun queueDepth(): Int = queueDepth.get().coerceAtLeast(0)
 
     fun poolSnapshot(): PoolSnapshot = pool.snapshot()
@@ -208,6 +240,25 @@ internal class CacheManager(
     }
 
     /**
+     * 快照租约直达释放（action 线程调用，publishSnapshot 时归还可写缓冲的租约）：
+     * 只递减引用计数，不投递帧号延迟队列。归零时该 entry 必然不在 latest 快照的租约
+     * 持有中（latest 的租约会维持计数 >0），主线程只读 latest，不存在"画到已回收
+     * bitmap"的窗口；此时计数已归零，不能走 processReleasedEntry（会二次递减），
+     * 由 [MSG_RECYCLE_ZERO] 在 cache 线程直接入池/回收。
+     *
+     * 此前快照租约也走 enqueueRelease 环形队列：洪峰时快照每帧重建，每次全部同屏
+     * 条目 入队→主线程 drain（每条一次 synchronized）→cache 线程 flush，三线程
+     * 每秒数千次接力空转（计数归零前的 release 无回收副作用），是与 blbl 流畅度
+     * 差距的主要每帧成本之一。
+     */
+    fun releaseSnapshotLease(entry: SharedCacheEntry?) {
+        if (entry == null || entry.isRecycled) return
+        if (entry.release()) {
+            runCatching { handler.obtainMessage(MSG_RECYCLE_ZERO, entry).sendToTarget() }
+        }
+    }
+
+    /**
      * 延迟回收队列：主线程（drainReleasedBitmaps）只做出队并转投本队列，
      * 真正的 pool 归还/bitmap.recycle()（触发 NativeAllocationRegistry 与驱动侧纹理释放，
      * 突发时可达每帧 24 条）由 cache 线程在 MSG_FLUSH_RELEASED 中执行，避免顶到 vsync。
@@ -258,6 +309,12 @@ internal class CacheManager(
         if (entry.isRecycled) return
         // release() 归零说明没有其他持有者（item 已退场 + 共享表已淘汰），可安全回收。
         if (!entry.release()) return
+        recycleEntryBitmap(entry)
+    }
+
+    /** 已归零条目的实际回收（入池或 recycle）；isRecycled 防重入。 */
+    private fun recycleEntryBitmap(entry: SharedCacheEntry) {
+        if (entry.isRecycled) return
         val bmp = entry.bitmap
         if (bmp.isRecycled) return
         val pooled = pool.tryPut(bmp)
@@ -294,6 +351,12 @@ internal class CacheManager(
                     if (synchronized(recycleLock) { recycleQueue.isNotEmpty() }) {
                         flushRecycleQueueAsync()
                     }
+                }
+
+                MSG_RECYCLE_ZERO -> {
+                    // releaseSnapshotLease 归零直达：计数已归零，只入池/回收，不再递减。
+                    val entry = msg.obj as? SharedCacheEntry ?: return
+                    recycleEntryBitmap(entry)
                 }
                 MSG_CLEAR -> {
                     recycleFlushPosted.set(false)
@@ -334,6 +397,14 @@ internal class CacheManager(
 
         // 共享缓存命中：相同内容（text+color+textSize+stroke+typeface）的弹幕复用同一 bitmap。
         val danmaku = item.data
+        // 内联段（表情/高赞图标）：VIP 渐变走整行贴图，不掺内联段。
+        // 表情位图未就绪的占位版本与完整版本分开存（emotePlaceholder 掺 key），
+        // 避免"占位 bitmap 被共享后，表情就绪的弹幕永远命中占位版"。
+        val segments =
+            if (danmaku.vipGradient) null else resolveInlineSegments(item, style)
+        val emotePlaceholder = segments != null && segments.any {
+            it is DanmakuInlineSegment.Emote && EmoteBitmapLoader.getCached(it.url) == null
+        }
         val key = sharedCacheKey(
             text = danmaku.text,
             color = danmaku.color and 0xFFFFFF,
@@ -346,6 +417,7 @@ internal class CacheManager(
             vipStrokeTextureUrl = danmaku.vipGradientStyle.strokeTextureUrl,
             vipFillTextureLoaded = danmaku.vipGradient && VipDanmakuTextureCache.getBitmap(danmaku.vipGradientStyle.fillTextureUrl) != null,
             vipStrokeTextureLoaded = danmaku.vipGradient && VipDanmakuTextureCache.getBitmap(danmaku.vipGradientStyle.strokeTextureUrl) != null,
+            emotePlaceholder = emotePlaceholder,
         )
         val shared = sharedCacheStore[key]
         if (shared != null && !shared.isRecycled) {
@@ -421,9 +493,16 @@ internal class CacheManager(
                 false
             }
             if (!vipDrawn) {
-                // 普通弹幕，或 VIP 贴图未加载时的白字兜底。
-                if (drawStrokeEnabled) canvas.drawText(text, outlinePad, baseline, stroke)
-                canvas.drawText(text, outlinePad, baseline, fill)
+                // 普通弹幕（或 VIP 贴图未加载时的白字兜底）：含表情/高赞图标时分段烘焙。
+                drawTextSegments(
+                    canvas = canvas,
+                    text = text,
+                    segments = segments,
+                    outlinePad = outlinePad,
+                    baseline = baseline,
+                    textHeightPx = textHeightPx,
+                    drawStrokeEnabled = drawStrokeEnabled,
+                )
             }
         }
 
@@ -442,6 +521,107 @@ internal class CacheManager(
         }.onFailure {
             AppLog.w(TAG, "cache result dispatch failed", it)
         }
+    }
+
+    /**
+     * 取/解析内联段（cache 线程侧副本，与 Engine.parseInlineSegmentsFor 同逻辑）：
+     * 缓存命中要求词典版本与高赞图标开关一致；词典未就绪时不缓存解析结果。
+     * 与 action 线程并发写 item.inlineSegments 幂等（同输入同输出），volatile 保证可见性。
+     */
+    private fun resolveInlineSegments(
+        item: DanmakuItem,
+        style: CacheStyle,
+    ): List<DanmakuInlineSegment>? {
+        val emoteVersion = DanmakuEmoteRepository.version()
+        val cached = item.inlineSegments
+        if (cached != null && item.inlineSegmentsEmoteVersion == emoteVersion &&
+            item.inlineSegmentsShowIcon == style.showHighLikeIcon
+        ) return cached
+        val parsed = DanmakuInlineParser.parse(
+            text = item.data.text,
+            isHighLiked = item.data.isHighLiked,
+            showHighLikeIcon = style.showHighLikeIcon,
+            canParseEmote = emoteVersion > 0,
+            urlForToken = DanmakuEmoteRepository::urlForToken,
+        )
+        if (parsed != null && DanmakuInlineParser.shouldCacheParsedSegments(item.data.text, emoteVersion > 0)) {
+            item.inlineSegments = parsed
+            item.inlineSegmentsEmoteVersion = emoteVersion
+            item.inlineSegmentsShowIcon = style.showHighLikeIcon
+        }
+        return parsed
+    }
+
+    /**
+     * 分段烘焙：Text 段描边+填充，表情段画位图（缺失时圆角占位框 + prefetch），高赞段画点赞图标。
+     * 行高/间隙口径与 DanmakuEngine.measureTextWidthWithInlineSegments 一致，保证不裁内容。
+     */
+    private fun drawTextSegments(
+        canvas: Canvas,
+        text: String,
+        segments: List<DanmakuInlineSegment>?,
+        outlinePad: Float,
+        baseline: Float,
+        textHeightPx: Float,
+        drawStrokeEnabled: Boolean,
+    ) {
+        if (segments == null) {
+            if (drawStrokeEnabled) canvas.drawText(text, outlinePad, baseline, stroke)
+            canvas.drawText(text, outlinePad, baseline, fill)
+            return
+        }
+        val emoteSizePx = textHeightPx.coerceAtLeast(1f)
+        val emoteTop = outlinePad
+        val radius = (emoteSizePx * 0.18f).coerceIn(2f, 10f)
+        val iconGapPx = inlineIconGapPx(emoteSizePx)
+        var cursorX = outlinePad
+        for (seg in segments) {
+            when (seg) {
+                is DanmakuInlineSegment.Text -> {
+                    if (seg.end > seg.start) {
+                        if (drawStrokeEnabled) canvas.drawText(text, seg.start, seg.end, cursorX, baseline, stroke)
+                        canvas.drawText(text, seg.start, seg.end, cursorX, baseline, fill)
+                        cursorX += fill.measureText(text, seg.start, seg.end)
+                    }
+                }
+                is DanmakuInlineSegment.Emote -> {
+                    val emote = EmoteBitmapLoader.getCached(seg.url)
+                    if (emote != null && !emote.isRecycled) {
+                        emoteRect.set(cursorX, emoteTop, cursorX + emoteSizePx, emoteTop + emoteSizePx)
+                        canvas.drawBitmap(emote, null, emoteRect, emotePaint)
+                    } else {
+                        // Engine 建图前已做就绪检查，此处缺失属极端竞态（烘焙瞬间被逐出）：
+                        // 画占位框兜底，prefetch 让下一次重建拿到完整版本。
+                        EmoteBitmapLoader.prefetch(seg.url)
+                        emoteRect.set(cursorX, emoteTop, cursorX + emoteSizePx, emoteTop + emoteSizePx)
+                        canvas.drawRoundRect(emoteRect, radius, radius, emotePlaceholderFill)
+                        canvas.drawRoundRect(emoteRect, radius, radius, emotePlaceholderStroke)
+                    }
+                    cursorX += emoteSizePx
+                }
+                is DanmakuInlineSegment.HighLikeIcon -> {
+                    drawInlineLikeIcon(cursorX, emoteTop, emoteSizePx, canvas)
+                    cursorX += emoteSizePx + iconGapPx
+                }
+            }
+        }
+    }
+
+    private fun inlineIconGapPx(iconSizePx: Float): Float = (iconSizePx * 0.14f).coerceAtLeast(density * 2f)
+
+    private val density: Float = appContext.resources.displayMetrics.density.takeIf { it.isFinite() && it > 0f } ?: 1f
+
+    private fun drawInlineLikeIcon(
+        left: Float,
+        top: Float,
+        sizePx: Float,
+        canvas: Canvas,
+    ) {
+        val icon = inlineLikeIcon ?: return
+        val right = (left + sizePx).roundToInt()
+        val bottom = (top + sizePx).roundToInt()
+        icon.setBounds(left.roundToInt(), top.roundToInt(), right, bottom)
+        icon.draw(canvas)
     }
 
     /** 清空共享表，释放每项表持有的引用（item 引用不受影响）。 */
@@ -559,6 +739,7 @@ internal class CacheManager(
         vipStrokeTextureUrl: String,
         vipFillTextureLoaded: Boolean,
         vipStrokeTextureLoaded: Boolean,
+        emotePlaceholder: Boolean,
     ): Long {
         var acc = FNV_OFFSET
         acc = mix(acc, text.hashCode().toLong())
@@ -568,6 +749,7 @@ internal class CacheManager(
         acc = mix(acc, typefaceOrdinal.toLong())
         acc = mix(acc, strokeWidthPx.toBits().toLong())
         acc = mix(acc, outlinePadPx.toBits().toLong())
+        acc = mix(acc, if (emotePlaceholder) 1L else 0L)
         acc = mix(acc, if (vipGradient) 1L else 0L)
         if (vipGradient) {
             acc = mix(acc, vipFillTextureUrl.hashCode().toLong())

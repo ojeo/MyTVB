@@ -17,6 +17,7 @@ import com.tutu.myblbl.repository.AllSeriesRepository
 import com.tutu.myblbl.repository.AuthRepository
 import com.tutu.myblbl.repository.FavoriteRepository
 import com.tutu.myblbl.repository.HomeLaneRepository
+import com.tutu.myblbl.repository.PersonalFeedPrewarmer
 import com.tutu.myblbl.repository.LiveRepository
 import com.tutu.myblbl.repository.SearchRepository
 import com.tutu.myblbl.repository.SeriesRepository
@@ -67,7 +68,7 @@ val networkModule = module {
 
 val repositoryModule = module {
     single { com.tutu.myblbl.repository.remote.AllSeriesRepository(get()) }
-    single { com.tutu.myblbl.repository.remote.AuthRepository(get(), get()) }
+    single { com.tutu.myblbl.repository.remote.AuthRepository(get()) }
     single { com.tutu.myblbl.repository.remote.TvAuthRepository(get(named("noCookie"))) }
     single { com.tutu.myblbl.repository.remote.FavoriteRepository(get(), get(), get()) }
     single { com.tutu.myblbl.repository.remote.HomeLaneRepository(get(), get(), get(), get()) }
@@ -84,6 +85,7 @@ val repositoryModule = module {
     single { SeriesRepository(get()) }
     single { VideoRepository(get(), get()) }
     single { UserRepository(get(), get(), get()) }
+    single { PersonalFeedPrewarmer(get(), get(), get()) }
     single { RecommendFeedRepository(androidContext()) }
     single { HotFeedRepository() }
     single { HomeLaneFeedRepository(get()) }
@@ -102,7 +104,7 @@ val viewModelModule = module {
     viewModel { LiveViewModel(get()) }
     viewModel { LiveListViewModel(get()) }
     viewModel { LiveRecommendViewModel(get()) }
-    viewModel { MeListViewModel(get()) }
+    viewModel { MeListViewModel(get(), get()) }
     viewModel { MeViewModel(get(), get()) }
     viewModel { SearchViewModel(get()) }
     viewModel { LivePlayerViewModel(get(), LiveDanmakuManager(get(), get(), get())) }

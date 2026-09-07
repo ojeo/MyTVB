@@ -120,6 +120,7 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
         private const val KEY_RESUME_PLAYBACK = "resume_playback"
         private const val KEY_SPONSOR_BLOCK_ENABLED = "sponsor_block_enabled"
         private const val KEY_AUDIO_NORMALIZE = "audio_normalize"
+        private const val KEY_SEAMLESS_QUALITY_SWITCH = "seamless_quality_switch"
         private const val COMMON_POSITION_RISK_CONTROL = 6
         private val DM_SMART_FILTER_OPTIONS = arrayOf("关", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10")
 
@@ -241,7 +242,8 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
             SettingModel(getString(R.string.show_next_previous), "关"),
             SettingModel(getString(R.string.resume_playback), "开"),
             SettingModel("空降助手", "关"),
-            SettingModel("音量均衡", "关")
+            SettingModel("音量均衡", "关"),
+            SettingModel("无缝切换清晰度", "关")
         )
 
         dmSettings = mutableListOf(
@@ -567,6 +569,7 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
             11 -> toggleSetting(playerSettings, 11, KEY_RESUME_PLAYBACK)
             12 -> toggleSponsorBlock()
             13 -> toggleSetting(playerSettings, 13, KEY_AUDIO_NORMALIZE)
+            14 -> toggleSetting(playerSettings, 14, KEY_SEAMLESS_QUALITY_SWITCH)
         }
     }
 
@@ -1102,6 +1105,7 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
         applySavedValue(playerSettings, 11, KEY_RESUME_PLAYBACK)
         applySavedValue(playerSettings, 12, KEY_SPONSOR_BLOCK_ENABLED)
         applySavedValue(playerSettings, 13, KEY_AUDIO_NORMALIZE)
+        applySavedValue(playerSettings, 14, KEY_SEAMLESS_QUALITY_SWITCH)
 
         applySavedValue(dmSettings, 0, KEY_DM_SWITCH)
         applySavedValue(dmSettings, 1, KEY_DM_ALPHA)
@@ -1810,6 +1814,34 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
             ) {
                 extraLayoutSpace[0] = extraLayoutSpacePx
                 extraLayoutSpace[1] = extraLayoutSpacePx
+            }
+
+            // 列表首尾按上/下键时焦点留在原地，不回退到全局搜索甩到列表外
+            override fun onInterceptFocusSearch(focused: View, direction: Int): View? {
+                val position = itemLayoutPosition(focused)
+                if (position != RecyclerView.NO_POSITION) {
+                    if (direction == View.FOCUS_UP && position == 0) {
+                        return focused
+                    }
+                    if (direction == View.FOCUS_DOWN && position == itemCount - 1) {
+                        return focused
+                    }
+                }
+                return super.onInterceptFocusSearch(focused, direction)
+            }
+
+            /** 焦点可能在 item 内部的 click_view 上，向上找到 RecyclerView 的直接 child 再取位置。 */
+            private fun itemLayoutPosition(focused: View): Int {
+                var target: View = focused
+                var parent = target.parent
+                while (parent is ViewGroup && parent !is RecyclerView) {
+                    target = parent
+                    parent = target.parent
+                }
+                if (parent !is RecyclerView) {
+                    return RecyclerView.NO_POSITION
+                }
+                return getPosition(target)
             }
         }
     }
