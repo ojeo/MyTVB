@@ -42,6 +42,7 @@ import com.tutu.myblbl.feature.player.danmaku.clock.PresentationTimestampResolve
 import com.tutu.myblbl.feature.player.danmaku.clock.RenderClockDriver
 import com.tutu.myblbl.feature.player.danmaku.clock.projectSample
 import com.tutu.myblbl.feature.player.danmaku.common.BiliDanmakuStyle
+import com.tutu.myblbl.feature.player.danmaku.emote.DanmakuEmoteRepository
 import com.tutu.myblbl.feature.player.danmaku.model.DanmakuKind
 import com.tutu.myblbl.feature.player.view.DanmakuMaskHostLayout
 import kotlin.math.roundToInt
@@ -95,6 +96,12 @@ class GlDanmakuView @JvmOverloads constructor(
         private const val PERF_LOG_INTERVAL_MS = 3_000L
         private const val PROVIDER_SAMPLE_INTERVAL_MS = 100L
         private const val VSYNC_GAP_THRESHOLD_NS = 25_000_000L
+
+        // ---- 空闲退避（对齐 upstream Canvas 引擎的 frameSchedule 空闲休眠）----
+        /** 休眠自醒下限：至少一帧，避免退化成忙等。 */
+        private const val IDLE_MIN_WAKE_MS = 16L
+        /** 休眠自醒上限：nextWakeAtMs 缺失或过远时的兜底，限制最坏情况下的入场延迟。 */
+        private const val IDLE_MAX_WAKE_MS = 500L
 
         // ---- Debug Overlay ----
         private const val DIAG_RING_CAPACITY = 600
@@ -250,6 +257,16 @@ class GlDanmakuView @JvmOverloads constructor(
     private var renderLoopRunning = false
     private val frameCallback = FrameCallback()
 
+    // ---- 空闲退避状态（仅 RenderThread 访问，除 lastScheduleNowMs）----
+    /** 定时唤醒已排队：期间渲染循环停摆，由 [idleWakeRunnable] 或强制唤醒恢复。 */
+    private var idleWakePosted = false
+    private val idleWakeRunnable = Runnable {
+        idleWakePosted = false
+        startRenderLoopIfNeeded()
+    }
+    /** 渲染线程写入的最近一次调度域时间，供 action 线程换算休眠时长。 */
+    @Volatile private var lastScheduleNowMs: Long = 0L
+
     private var lastConfig: DanmakuConfig? = null
     private var lastStyleKey: String? = null
 
@@ -347,10 +364,18 @@ class GlDanmakuView @JvmOverloads constructor(
         // SurfaceView 默认 willNotDraw=true（View 层不绘制），但 Debug Overlay 面板要画在
         // View 合成层（弹幕 Surface 之上），必须显式允许 onDraw。
         setWillNotDraw(false)
-        cacheManager = CacheManager(context.applicationContext, resources.displayMetrics.density) { result ->
+        cacheManager = CacheManager(context.applicationContext) { result ->
             actionHandler.obtainMessage(MSG_CACHE_RESULT, result).sendToTarget()
         }
         engine = DanmakuEngine(context.applicationContext, resources.displayMetrics, cacheManager)
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        // 表情词典预热（磁盘 + 网络，24h 刷新一次；异步无阻塞）。
+        // 该预热点原先挂在已移除的 Canvas 引擎 DanmakuView 上，GPU 引擎沿用同一入口，
+        // 否则表情弹幕冷启动只能走单条 prefetch，首屏表情会缺图。
+        DanmakuEmoteRepository.warmup(context)
     }
 
     override val renderView: View get() = this
@@ -482,6 +507,7 @@ class GlDanmakuView @JvmOverloads constructor(
         // allowClockBackwardTo 必须与 stepTime 同线程（RenderThread），避免跨线程重置/写入交错。
         renderHandler.post {
             engine.allowClockBackwardTo(target)
+            cancelIdleWake()
             startRenderLoopIfNeeded()
         }
     }
@@ -589,6 +615,7 @@ class GlDanmakuView @JvmOverloads constructor(
         renderHandler.post {
             clockDriver.reset()
             renderLoopRunning = false
+            cancelIdleWake()
             runCatching { Choreographer.getInstance().removeFrameCallback(frameCallback) }
         }
         runCatching {
@@ -597,9 +624,65 @@ class GlDanmakuView @JvmOverloads constructor(
         }
     }
 
+    /** 强制唤醒：撤掉空闲定时并立即起渲染循环（数据/seek/可见性等真实变化走这里）。 */
     private fun requestRenderFrame() {
         if (released) return
-        renderHandler.post { startRenderLoopIfNeeded() }
+        renderHandler.post {
+            cancelIdleWake()
+            startRenderLoopIfNeeded()
+        }
+    }
+
+    /**
+     * 非强制续帧：供 100ms 一次的 provider 采样使用。
+     * 主动空闲休眠（[idleWakePosted]）期间不打断定时唤醒；其余情况照常起循环——
+     * 典型场景是暂停后恢复播放：渲染循环此前已被 doRenderFrame 停掉，必须靠采样重新拉起。
+     */
+    private fun requestRenderFrameIfRunning() {
+        if (released) return
+        renderHandler.post {
+            if (idleWakePosted) return@post
+            startRenderLoopIfNeeded()
+        }
+    }
+
+    /** RenderThread：撤销已排队的空闲定时唤醒。 */
+    private fun cancelIdleWake() {
+        if (!idleWakePosted) return
+        idleWakePosted = false
+        renderHandler.removeCallbacks(idleWakeRunnable)
+    }
+
+    /**
+     * RenderThread：进入空闲休眠——注销 vsync 回调，改由定时唤醒。
+     * 播放中零弹幕时段不再 60Hz 空转 beginFrame/swapBuffers（TV SoC 上纯浪费 GPU 与功耗）。
+     */
+    private fun enterIdle(delayMs: Long) {
+        if (released || !renderLoopRunning || idleWakePosted) return
+        Choreographer.getInstance().removeFrameCallback(frameCallback)
+        renderLoopRunning = false
+        idleWakePosted = true
+        renderHandler.postDelayed(idleWakeRunnable, delayMs)
+    }
+
+    /**
+     * Action 线程：act 后无在场/待入场弹幕时，按下一入场时刻让渲染线程休眠。
+     * 时长 clamp 在 [IDLE_MIN_WAKE_MS, IDLE_MAX_WAKE_MS]：即使 nextWakeAtMs 算错，
+     * 最多延迟一档上限就能自醒，不会把弹幕永久睡没。
+     */
+    private fun maybeEnterIdle() {
+        if (released) return
+        val schedule = runCatching { engine.frameSchedule() }.getOrNull() ?: return
+        if (schedule.animate) return
+        val nowMs = lastScheduleNowMs
+        val nextWakeAtMs = schedule.nextWakeAtMs
+        val delayMs =
+            if (nextWakeAtMs == null) {
+                IDLE_MAX_WAKE_MS
+            } else {
+                (nextWakeAtMs - nowMs).coerceIn(IDLE_MIN_WAKE_MS, IDLE_MAX_WAKE_MS)
+            }
+        renderHandler.post { enterIdle(delayMs) }
     }
 
     private fun startProviderSampler() {
@@ -659,7 +742,8 @@ class GlDanmakuView @JvmOverloads constructor(
             )
         providerSnapshot = next
         // area 已不再参与 measure（buffer 恒为全屏），改弹幕区域无需 requestLayout。
-        if (providerSnapshot.isPlaying || providerSnapshot.playWhenReady) requestRenderFrame()
+        // 空闲休眠期间不强制唤醒：定时唤醒（或真实数据/seek 事件）负责恢复渲染循环。
+        if (providerSnapshot.isPlaying || providerSnapshot.playWhenReady) requestRenderFrameIfRunning()
     }
 
     private fun updateUiFrameMonitor(enabled: Boolean) {
@@ -981,6 +1065,7 @@ class GlDanmakuView @JvmOverloads constructor(
     private fun releaseEgl() {
         eglReady = false
         renderLoopRunning = false
+        cancelIdleWake()
         runCatching { Choreographer.getInstance().removeFrameCallback(frameCallback) }
         if (maskTextureId != 0) {
             GLES30.glDeleteTextures(1, intArrayOf(maskTextureId), 0)
@@ -1100,6 +1185,7 @@ class GlDanmakuView @JvmOverloads constructor(
                 projectSample(sampled.sample, presentationTimeNs) / 1_000_000L
             }
         engine.stepTime(scheduleNowMs = scheduleNowMs, motionNowNs = smoothPosNs, uiFrameId = frameId)
+        lastScheduleNowMs = scheduleNowMs
         cacheManager.drainReleasedBitmaps(frameId)
         detectMotionJump(smoothPosNs, scheduleNowMs, isPlaying)
 
@@ -1348,6 +1434,7 @@ class GlDanmakuView @JvmOverloads constructor(
                 MSG_ACT -> {
                     if (released) return
                     runCatching { engine.act() }
+                    maybeEnterIdle()
                 }
                 MSG_SET -> {
                     @Suppress("UNCHECKED_CAST")

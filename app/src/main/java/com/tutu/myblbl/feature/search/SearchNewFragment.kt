@@ -721,14 +721,6 @@ class SearchNewFragment :
         }
     }
 
-    private fun isDescendantOf(view: View, ancestor: View): Boolean {
-        var current = view.parent
-        while (current is View) {
-            if (current === ancestor) return true
-            current = current.parent
-        }
-        return false
-    }
 
     override fun onDestroyView() {
         hideSystemIme()
