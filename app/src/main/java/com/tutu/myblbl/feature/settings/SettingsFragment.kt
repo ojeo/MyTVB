@@ -113,6 +113,7 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
         private const val KEY_DM_ALLOW_VIP_COLORFUL_DM = "dm_allow_vip_colorful_dm"
         private const val KEY_DM_MERGE_DUPLICATE = "dm_merge_duplicate"
         private const val KEY_DM_SMART_SHIELD = "dm_smart_shield"
+        private const val KEY_DM_RENDER_ENGINE = "dm_render_engine"
         private const val KEY_GAIA_VGATE_V_VOUCHER = "gaia_vgate_v_voucher"
         private const val KEY_GAIA_VGATE_V_VOUCHER_SAVED_AT_MS = "gaia_vgate_v_voucher_saved_at_ms"
         private const val KEY_IPV4_ONLY = "ipv4_only"
@@ -123,6 +124,14 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
         private const val KEY_SEAMLESS_QUALITY_SWITCH = "seamless_quality_switch"
         private const val COMMON_POSITION_RISK_CONTROL = 6
         private val DM_SMART_FILTER_OPTIONS = arrayOf("关", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10")
+
+        /**
+         * 弹幕渲染引擎选项（存展示值，与其余弹幕项「存即显示」口径一致）：
+         * - GPU引擎：OpenGL 实例化渲染，支持防挡蒙版与双时钟 CONTINUOUS，为默认项。
+         * - 轻量化引擎：CPU Canvas 渲染（上游 DanmakuView），无蒙版/双时钟，通用性更好。
+         * 切换在下一次进入播放页时生效（播放器 setup 时创建弹幕层，无需重建运行时）。
+         */
+        private val DM_RENDER_ENGINE_OPTIONS = arrayOf("GPU引擎", "轻量化引擎")
 
         /**
          * 青少年模式-单次观看时长/休息时长选项：0=不限制，1 分钟为测试用，之后步进 10 分钟，最长 120 分钟。
@@ -259,7 +268,8 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
             SettingModel(getString(R.string.allow_vip_colorful_dm), "开"),
             SettingModel(getString(R.string.dm_merge_duplicate), "开"),
             SettingModel(getString(R.string.dm_smart_shield), "关"),
-            SettingModel(getString(R.string.show_dm_switch), "关")
+            SettingModel(getString(R.string.show_dm_switch), "关"),
+            SettingModel(getString(R.string.dm_render_engine), DM_RENDER_ENGINE_OPTIONS.first())
         )
 
         deviceSettings.add(DEVICE_POSITION_VERSION, SettingModel("应用版本", BuildConfig.VERSION_NAME))
@@ -600,6 +610,8 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
                 appSettings.putStringAsync(KEY_DM_SMART_SHIELD, value)
             }
             12 -> toggleSetting(dmSettings, 12, KEY_SHOW_DM_SWITCH)
+            // 13: 弹幕渲染引擎（GPU / 轻量化 Canvas）。仅落盘，下一次进入播放页生效。
+            13 -> showDmChoiceDialog(position, KEY_DM_RENDER_ENGINE, DM_RENDER_ENGINE_OPTIONS)
         }
     }
 
@@ -1122,6 +1134,10 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
         applySavedValue(dmSettings, 10, KEY_DM_MERGE_DUPLICATE)
         applySavedValue(dmSettings, 11, KEY_DM_SMART_SHIELD)
         applySavedValue(dmSettings, 12, KEY_SHOW_DM_SWITCH)
+        applySavedValue(dmSettings, 13, KEY_DM_RENDER_ENGINE)
+        if (dmSettings[13].info !in DM_RENDER_ENGINE_OPTIONS) {
+            dmSettings[13].info = DM_RENDER_ENGINE_OPTIONS.first()
+        }
     }
 
     private fun applySavedValue(target: MutableList<SettingModel>, index: Int, key: String) {

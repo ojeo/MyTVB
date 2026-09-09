@@ -58,8 +58,11 @@ import com.tutu.myblbl.feature.player.LiveLineInfo
 import com.tutu.myblbl.feature.player.LiveQualityInfo
 import com.tutu.myblbl.feature.player.PlaybackStartupTrace
 import com.tutu.myblbl.feature.player.danmaku.BlblDanmakuController
+import com.tutu.myblbl.feature.player.danmaku.DanmakuRenderEngine
 import com.tutu.myblbl.feature.player.danmaku.DanmakuRenderHost
+import com.tutu.myblbl.feature.player.danmaku.DanmakuView
 import com.tutu.myblbl.feature.player.danmaku.render.GlDanmakuView
+import com.tutu.myblbl.feature.player.danmaku.render.LiteDanmakuRenderHost
 import com.tutu.myblbl.feature.player.danmaku.common.DanmakuSettingsSnapshot
 import com.tutu.myblbl.feature.player.danmaku.common.DanmakuController
 import com.tutu.myblbl.feature.player.danmaku.common.LiveDanmakuController
@@ -2798,16 +2801,22 @@ class MyPlayerView @JvmOverloads constructor(
     }
 
     /**
-     * 创建弹幕引擎（GPU 优先，EGL 失败自动降级 Canvas）。需在 setData 之前、播放器 setup 时调用，
-     * 保证引擎收到播放起始位置/首帧等早期通知；幂等，可安全重复调用。
-     * 引擎作为蒙版宿主的子层；GPU 引擎为独立 Surface（位于视频之上、UI 层之下），
-     * 防挡蒙版（View 层 clipPath）对独立 Surface 不生效，GPU 后端改用共享 path 纹理裁剪。
+     * 创建弹幕层。引擎由「设置-弹幕-弹幕渲染引擎」决定（默认 GPU）：
+     * - GPU：GlDanmakuView，独立 Surface（位于视频之上、UI 层之下），
+     *   防挡蒙版（View 层 clipPath）对独立 Surface 不生效，GPU 后端改用共享 path 纹理裁剪。
+     * - 轻量化：DanmakuView（CPU Canvas），作为普通子 View 加入蒙版宿主，由 View 层裁剪决定遮挡。
+     *
+     * 需在 setData 之前、播放器 setup 时调用，保证引擎收到播放起始位置/首帧等早期通知；
+     * 幂等，可安全重复调用。引擎一经创建本次播放不再更换（轻量化引擎 detach 即永久 release），
+     * 修改设置后下一次进入播放页生效。
      */
     fun setupDanmakuEngine() {
         if (liteDanmakuController != null) return
-        // 仅 GPU 引擎（Canvas 已于 1.6.16+ 移除）。
-        val view: DanmakuRenderHost =
-            GlDanmakuView(context).also { glView ->
+        val engine = MyPlayerSettingPreferenceStore(context).getRenderEngine()
+        AppLog.i("DmEngine", "setupDanmakuEngine engine=${engine.prefValue}")
+        val view: DanmakuRenderHost = when (engine) {
+            DanmakuRenderEngine.LITE -> LiteDanmakuRenderHost(DanmakuView(context))
+            DanmakuRenderEngine.GPU -> GlDanmakuView(context).also { glView ->
                 // GPU 引擎初始化失败（EGL 不可用等）时不再回退 Canvas：
                 // 静默禁用弹幕层并停止控制器，保证播放不受影响。
                 glView.onEglFailed = { post { disableDanmakuAfterEglFailure(glView) } }
@@ -2816,6 +2825,7 @@ class MyPlayerView @JvmOverloads constructor(
                 // Debug Overlay 的视频 FPS：来自播放器 VideoFrameMetadataListener 统计。
                 glView.videoFpsProvider = { videoFps }
             }
+        }
         val renderView = view.renderView
         renderView.layoutParams = FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
         renderView.isClickable = false

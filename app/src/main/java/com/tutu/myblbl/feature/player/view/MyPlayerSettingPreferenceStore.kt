@@ -2,6 +2,7 @@ package com.tutu.myblbl.feature.player.view
 
 import android.content.Context
 import com.tutu.myblbl.core.common.settings.AppSettingsDataStore
+import com.tutu.myblbl.feature.player.danmaku.DanmakuRenderEngine
 import com.tutu.myblbl.feature.player.danmaku.DanmakuTrackSpacing
 import com.tutu.myblbl.model.dm.DmScreenArea
 import org.koin.mp.KoinPlatform
@@ -18,6 +19,16 @@ internal class MyPlayerSettingPreferenceStore(
      */
     fun getTrackSpacingPref(): String =
         appSettings.getCachedString(MyPlayerSettingView.KEY_DM_TRACK_SPACING) ?: DanmakuTrackSpacing.DEFAULT.prefValue
+
+    /**
+     * 读取全局弹幕渲染引擎（"GPU引擎" / "轻量化引擎"）。仅在 APP设置-弹幕设置中可调，
+     * 不在播放器内面板暴露，故独立于 [loadDanmakuState] 的 PanelState 通道。
+     * 引擎在播放器 setup 时确定，切换后下一次进入播放页生效。
+     */
+    fun getRenderEngine(): DanmakuRenderEngine =
+        DanmakuRenderEngine.fromPref(
+            appSettings.getCachedString(MyPlayerSettingView.KEY_DM_RENDER_ENGINE)
+        )
 
     fun loadDanmakuState(
         state: MyPlayerSettingMenuBuilder.PanelState

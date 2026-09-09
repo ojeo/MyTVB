@@ -58,6 +58,13 @@ class MyPlayerSettingView @JvmOverloads constructor(
         internal const val KEY_DM_SMART_SHIELD = "dm_smart_shield"
         internal const val KEY_DM_TRACK_SPACING = "dm_track_spacing"
 
+        /**
+         * 弹幕渲染引擎（与 SettingsFragment.KEY_DM_RENDER_ENGINE 同名同值）。
+         * 只在「设置-弹幕」中可调，不在播放器面板暴露，故独立于 [PanelState] 通道，
+         * 由 MyPlayerSettingPreferenceStore 直接读取。
+         */
+        internal const val KEY_DM_RENDER_ENGINE = "dm_render_engine"
+
         private const val LEVEL_MAIN = 1
         private const val LEVEL_SUB = 2
         private const val LEVEL_DM = 3
