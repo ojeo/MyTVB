@@ -296,17 +296,18 @@ class BlblDanmakuController(
         val snapshot = lastSnapshot ?: return
         if (!snapshot.enabled) return
         val nowMs = SystemClock.uptimeMillis()
+        // 直播弹幕恒立即透传，不看 mergeDuplicate 设置：合并批处理器要等满 800ms
+        // 合并窗口才放行（实测 emitted→append 稳定 ~900ms），直播弹幕比 B 站官方慢
+        // 近 1 秒。合并等待的收益（同文本 ×N）远低于即时性；视频场景的合并是离线
+        // 预知的、无此代价，不受影响。节流（100ms/30 条）与屏上密度上限仍然生效。
         emitLiveDanmakus(
             liveBatcher.offer(
                 item = dm,
                 nowMs = nowMs,
-                mergeEnabled = snapshot.mergeDuplicate,
+                mergeEnabled = false,
                 displayCapacity = estimateLiveDisplayCapacity(),
             )
         )
-        if (snapshot.mergeDuplicate && liveBatcher.pendingCount() > 0) {
-            scheduleLiveFlush()
-        }
     }
 
     override fun applySettings(snapshot: DanmakuSettingsSnapshot) {
@@ -612,7 +613,9 @@ class BlblDanmakuController(
         val trackHeight = (currentConfig.textSizeSp * density * currentConfig.trackSpacing.factor)
             .coerceAtLeast(24f)
         val tracks = (visibleHeight / trackHeight).toInt().coerceAtLeast(3)
-        return (tracks * 2).coerceIn(6, 160)
+        // 每轨道并发约 2~3 条（追尾判定控制），×3 对齐轨道实际承载；
+        // 性能兜底仍在：throttle(30条/100ms)、引擎同屏自适应上限、轨道追尾判定。
+        return (tracks * 3).coerceIn(6, 160)
     }
 
     private fun resetLiveState() {

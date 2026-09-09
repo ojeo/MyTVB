@@ -40,6 +40,15 @@ internal interface DanmakuEngineMainApi {
      */
     fun stepTime(scheduleNowMs: Long, motionNowNs: Long, uiFrameId: Int)
 
+    /**
+     * 旧 Canvas 引擎兼容入口：上游保留的 `DanmakuPlayer` 仍按此二参签名调用。
+     * 旧引擎无运动域拆分，按 ms→ns 直译。运行期 GPU 引擎不走这里（GlDanmakuView 用三参版本），
+     * 此重载仅为让上游 DanmakuPlayer/DanmakuView 源码与上游逐字节一致，避免每次同步上游冲突。
+     */
+    fun stepTime(positionMs: Long, uiFrameId: Int) {
+        stepTime(scheduleNowMs = positionMs, motionNowNs = positionMs * 1_000_000L, uiFrameId = uiFrameId)
+    }
+
     /** 主线程专用：为合法回退（seek 回看）放行调度域单调高水位。必须与 stepTime 同线程调用。 */
     fun allowClockBackwardTo(positionMs: Long)
 
@@ -149,6 +158,11 @@ internal interface DanmakuEngineActionApi {
 
     /** 同 [DanmakuEngineMainApi.stepTime]，双时间入参。 */
     fun stepTime(scheduleNowMs: Long, motionNowNs: Long, uiFrameId: Int)
+
+    /** 旧 Canvas 引擎兼容入口，语义同 [DanmakuEngineMainApi.stepTime] 的二参重载。 */
+    fun stepTime(positionMs: Long, uiFrameId: Int) {
+        stepTime(scheduleNowMs = positionMs, motionNowNs = positionMs * 1_000_000L, uiFrameId = uiFrameId)
+    }
 
     /** 调度域当前媒体时间（ms）。 */
     fun currentPositionMs(): Long
@@ -444,6 +458,11 @@ internal class DanmakuEngine(
 
     private fun sp(v: Float): Float =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, v, displayMetrics)
+
+    // 旧 Canvas 引擎兼容：两接口都声明了该二参重载的默认实现，实现类须显式消歧。
+    override fun stepTime(positionMs: Long, uiFrameId: Int) {
+        stepTime(scheduleNowMs = positionMs, motionNowNs = positionMs * 1_000_000L, uiFrameId = uiFrameId)
+    }
 
     override fun stepTime(scheduleNowMs: Long, motionNowNs: Long, uiFrameId: Int) {
         // ---- 调度域 ----

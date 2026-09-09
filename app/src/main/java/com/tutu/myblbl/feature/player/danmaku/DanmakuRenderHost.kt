@@ -7,7 +7,10 @@ import com.tutu.myblbl.feature.player.danmaku.clock.DanmakuClockMode
  * 弹幕渲染宿主抽象：当前仅 GPU 引擎（render.GlDanmakuView）实现。
  * 供 [BlblDanmakuController] 以引擎中立方式驱动。
  *
- * Canvas 引擎已于 1.6.16+ 移除（仅保留 GPU）。
+ * Canvas 引擎已于 1.6.16+ 移除（仅保留 GPU）。同目录下的 `DanmakuView` / `DanmakuPlayer`
+ * 是上游仍在维护的旧 Canvas 引擎源码，**本项目无任何调用方、不参与运行**，保留仅为与
+ * upstream 保持文件对齐（否则每次同步上游都会产生 modify/delete 冲突）。运行期唯一生效
+ * 的引擎是 `render.GlDanmakuView`（见 `MyPlayerView` 中的构造点），不要再引用旧引擎。
  */
 interface DanmakuRenderHost {
     /** 实际 View，用于 visibility / invalidate / 布局等 View 层操作。 */
