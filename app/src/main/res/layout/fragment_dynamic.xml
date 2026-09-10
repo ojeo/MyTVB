@@ -28,7 +28,7 @@
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintWidth_percent="0.18" />
 
-    <com.tutu.myblbl.core.ui.focus.VerticalFocusLockRecyclerView
+    <com.mytvb.core.ui.focus.VerticalFocusLockRecyclerView
         android:id="@+id/recyclerViewLeft"
         android:background="?attr/subBackgroundColor"
         android:layout_width="0dp"
@@ -119,7 +119,7 @@
                 app:layout_constraintStart_toStartOf="parent"
                 app:layout_constraintTop_toBottomOf="@+id/text_filter_panel_title" />
 
-            <com.tutu.myblbl.feature.search.view.KeyboardView
+            <com.mytvb.feature.search.view.KeyboardView
                 android:id="@+id/keyboard_filter"
                 android:clipChildren="false"
                 android:layout_width="0dp"

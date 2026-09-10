@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<com.tutu.myblbl.feature.player.view.SeekOverlayView xmlns:android="http://schemas.android.com/apk/res/android"
+<com.mytvb.feature.player.view.SeekOverlayView xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/view_seek_overlay"
     android:visibility="gone"
     android:layout_width="match_parent"

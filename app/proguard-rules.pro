@@ -22,13 +22,13 @@
 -keepclassmembers,allowobfuscation interface * {
     @retrofit2.http.* <methods>;
 }
--keep class com.tutu.myblbl.network.api.** { *; }
+-keep class com.mytvb.network.api.** { *; }
 
 # Network response wrappers（泛型类型信息不能被 R8 优化掉）
--keep class com.tutu.myblbl.network.response.** { *; }
+-keep class com.mytvb.network.response.** { *; }
 
 # Gson custom TypeAdapters
--keep class com.tutu.myblbl.model.adapter.** { *; }
+-keep class com.mytvb.model.adapter.** { *; }
 
 # OkHttp
 -dontwarn okhttp3.**
@@ -37,29 +37,29 @@
 -keep interface okhttp3.** { *; }
 
 # Model classes
--keep class com.tutu.myblbl.model.** { *; }
+-keep class com.mytvb.model.** { *; }
 
 # SponsorBlock / 空降助手
--keep class com.tutu.myblbl.feature.player.sponsor.** { *; }
+-keep class com.mytvb.feature.player.sponsor.** { *; }
 
 # TV 直播（marmot）：CloudConfig/CloudRes/MarmotModels/HzItem 由 Gson 反射解析，
 # 字段名/构造器被 R8 优化掉会导致 fromJson 静默置 null（曾引发「频道数据加载失败」：
 # DataWrapper.data 与 CloudConfig.res 都解析为 null）。必须保留类、字段、构造器。
--keep class com.tutu.myblbl.feature.marmot.domain.** { *; }
--keepclassmembers class com.tutu.myblbl.feature.marmot.domain.** {
+-keep class com.mytvb.feature.marmot.domain.** { *; }
+-keepclassmembers class com.mytvb.feature.marmot.domain.** {
     <init>(...);
 }
 
 # Koin DI
--keep class com.tutu.myblbl.di.** { *; }
--keep class com.tutu.myblbl.repository.** { *; }
--keep class com.tutu.myblbl.event.** { *; }
--keep class com.tutu.myblbl.core.common.** { *; }
--keep class com.tutu.myblbl.network.** { *; }
+-keep class com.mytvb.di.** { *; }
+-keep class com.mytvb.repository.** { *; }
+-keep class com.mytvb.event.** { *; }
+-keep class com.mytvb.core.common.** { *; }
+-keep class com.mytvb.network.** { *; }
 
 # ViewModel (Koin 反射创建)
 -keep class * extends androidx.lifecycle.ViewModel { <init>(...); }
--keep class com.tutu.myblbl.feature.**ViewModel { *; }
+-keep class com.mytvb.feature.**ViewModel { *; }
 
 # 通用 Android 优化
 -dontwarn javax.annotation.**

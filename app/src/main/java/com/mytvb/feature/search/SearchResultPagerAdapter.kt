@@ -1,0 +1,371 @@
+package com.mytvb.feature.search
+
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+
+import androidx.core.view.isVisible
+import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.mytvb.R
+import com.mytvb.databinding.PageSearchResultBinding
+import com.mytvb.model.search.SearchCategoryItem
+import com.mytvb.model.search.SearchItemModel
+import com.mytvb.model.search.SearchType
+import com.mytvb.core.ui.base.BaseListFragment
+import com.mytvb.core.ui.base.VideoRecyclerViewTuning
+import com.mytvb.core.ui.layout.WrapContentGridLayoutManager
+import com.mytvb.core.common.content.ContentFilter
+import com.mytvb.core.common.log.AppLog
+import com.mytvb.core.ui.focus.TabContentFocusHelper
+import com.mytvb.core.ui.decoration.GridSpacingItemDecoration
+import com.mytvb.core.ui.focus.tv.GridTvFocusStrategy
+import com.mytvb.core.ui.focus.tv.TvDataChangeReason
+import com.mytvb.core.ui.focus.tv.TvListFocusController
+
+class SearchResultPagerAdapter(
+    private val onItemClick: (SearchResultEntry) -> Unit,
+    private val onLoadMore: (SearchType) -> Unit,
+    private val onTopEdgeUp: ((View) -> Boolean)? = null
+) : RecyclerView.Adapter<SearchResultPagerAdapter.ViewHolder>() {
+
+    private companion object {
+        const val TAG = "SearchFocus"
+    }
+
+    private val holders = mutableMapOf<SearchType, ViewHolder>()
+    private val pendingStates = mutableMapOf<SearchType, PendingState>()
+    private val pages = mutableListOf<SearchResultPage>()
+    private var focusedPageType: SearchType? = null
+
+    private data class PendingState(
+        val items: List<SearchItemModel>,
+        val loading: Boolean,
+        val hasMore: Boolean
+    )
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
+        val binding = PageSearchResultBinding.inflate(
+            LayoutInflater.from(parent.context),
+            parent,
+            false
+        )
+        return ViewHolder(binding)
+    }
+
+    override fun onBindViewHolder(holder: ViewHolder, position: Int) {
+        val page = pages[position]
+        holders[page.type] = holder
+        holder.bind(page)
+    }
+
+    override fun getItemCount(): Int = pages.size
+
+    override fun onViewRecycled(holder: ViewHolder) {
+        holder.release()
+        holders.entries.removeAll { it.value == holder }
+        super.onViewRecycled(holder)
+    }
+
+    fun getPageTitle(position: Int): String = pages.getOrNull(position)?.title.orEmpty()
+
+    fun getPageType(position: Int): SearchType? = pages.getOrNull(position)?.type
+
+    fun setPages(
+        categories: List<SearchCategoryItem>,
+        initialItems: Map<SearchType, List<SearchItemModel>> = emptyMap(),
+        initialLoading: Map<SearchType, Boolean> = emptyMap(),
+        initialHasMore: Map<SearchType, Boolean> = emptyMap()
+    ) {
+        val existing = pages.associateBy { it.type }
+        val newPages = categories.map { category ->
+            val existingItems = existing[category.type]?.items
+            val items = initialItems[category.type]?.toMutableList()
+                ?: existingItems
+                ?: mutableListOf()
+            SearchResultPage(
+                type = category.type,
+                title = category.showText,
+                items = items,
+                loading = initialLoading[category.type] ?: false,
+                hasMore = initialHasMore[category.type] ?: true
+            )
+        }
+        holders.clear()
+        pages.clear()
+        pages.addAll(newPages)
+        for (page in pages) {
+            val state = pendingStates.remove(page.type)
+            if (state != null) {
+                applyStateToPage(page, state)
+            }
+        }
+        notifyDataSetChanged()
+    }
+
+    fun clearResults() {
+        pendingStates.clear()
+        pages.forEach { page ->
+            page.items.clear()
+            page.loading = false
+        }
+        holders.values.forEach { holder ->
+            holder.submitEmpty()
+        }
+    }
+
+    fun submitResults(type: SearchType, items: List<SearchItemModel>) {
+        val page = pages.firstOrNull { it.type == type } ?: return
+        page.items.clear()
+        page.items.addAll(items)
+        holders[type]?.submit(page) ?: notifyItemChanged(pages.indexOf(page))
+    }
+
+    fun submitState(type: SearchType, items: List<SearchItemModel>, loading: Boolean, hasMore: Boolean) {
+        val state = PendingState(items, loading, hasMore)
+        pendingStates[type] = state
+        val page = pages.firstOrNull { it.type == type }
+        if (page != null) {
+            applyStateToPage(page, state)
+            holders[type]?.submit(page) ?: notifyItemChanged(pages.indexOf(page))
+        }
+    }
+
+    private fun applyStateToPage(page: SearchResultPage, state: PendingState) {
+        page.items.clear()
+        page.items.addAll(state.items)
+        page.loading = state.loading
+        page.hasMore = state.hasMore
+    }
+
+    fun scrollToTop(position: Int) {
+        val type = getPageType(position) ?: return
+        holders[type]?.scrollToTop()
+    }
+
+    fun focusPrimaryContent(type: SearchType?, anchorView: View? = null): Boolean {
+        return holders[type]?.focusPrimaryContent(anchorView) == true
+    }
+
+    fun captureFocusAnchors() {
+        focusedPageType = null
+        holders.forEach { (type, holder) ->
+            if (holder.captureFocusAnchor()) {
+                focusedPageType = type
+                AppLog.d(TAG, "captureFocusAnchors: focusedPage=$type")
+            }
+        }
+        AppLog.d(TAG, "captureFocusAnchors: done, focusedPageType=$focusedPageType holders=${holders.keys}")
+    }
+
+    fun restoreFocusAnchors() {
+        AppLog.d(TAG, "restoreFocusAnchors: focusedPageType=$focusedPageType holders=${holders.keys}")
+        val focusedType = focusedPageType
+        val focusedHolder = focusedType?.let { holders[it] }
+        if (focusedHolder != null) {
+            AppLog.d(TAG, "restoreFocusAnchors: trying focused page=$focusedType")
+            if (focusedHolder.restoreFocusAnchor()) {
+                AppLog.d(TAG, "restoreFocusAnchors: SUCCESS on focused page=$focusedType")
+                return
+            }
+            AppLog.d(TAG, "restoreFocusAnchors: FAILED on focused page=$focusedType, trying others")
+        }
+        val restored = holders.entries.any { (type, holder) ->
+            val ok = holder.restoreFocusAnchor()
+            AppLog.d(TAG, "restoreFocusAnchors: fallback page=$type result=$ok")
+            ok
+        }
+        if (!restored) {
+            AppLog.d(TAG, "restoreFocusAnchors: all FAILED, falling back to focusPrimaryContent")
+            holders.values.forEach { it.focusPrimaryContent() }
+        }
+    }
+
+    inner class ViewHolder(
+        private val binding: PageSearchResultBinding
+    ) : RecyclerView.ViewHolder(binding.root) {
+
+        private var currentType: SearchType? = null
+        private var currentAdapter: SearchItemAdapter? = null
+        private var currentPage: SearchResultPage? = null
+        private var tvFocusController: TvListFocusController? = null
+        private var currentSpanCount: Int = 4
+
+        fun bind(page: SearchResultPage) {
+            currentPage = page
+            if (currentType != page.type || currentAdapter == null) {
+                currentType = page.type
+                val spanCount = when (page.type) {
+                    SearchType.Video,
+                    SearchType.LiveRoom -> 4
+
+                    SearchType.Animation,
+                    SearchType.FilmAndTv -> 6
+
+                    SearchType.User -> 4
+                }
+                currentSpanCount = spanCount
+                currentAdapter = SearchItemAdapter(
+                    page.type,
+                    onItemClick,
+                    onTopEdgeUp,
+                    onItemFocused = { view, position ->
+                        tvFocusController?.onItemFocused(view, position)
+                    },
+                    onItemDpad = { view, keyCode, event ->
+                        tvFocusController?.handleKey(view, keyCode, event) == true
+                    },
+                    onItemsChanged = {
+                        tvFocusController?.onDataChanged(TvDataChangeReason.REMOVE_ITEM)
+                    }
+                )
+                binding.recyclerViewResult.layoutManager =
+                    WrapContentGridLayoutManager(binding.root.context, spanCount)
+                binding.recyclerViewResult.adapter = currentAdapter
+                currentAdapter?.let { adapter ->
+                    VideoRecyclerViewTuning.apply(binding.recyclerViewResult, adapter)
+                }
+                while (binding.recyclerViewResult.itemDecorationCount > 0) {
+                    binding.recyclerViewResult.removeItemDecorationAt(0)
+                }
+                binding.recyclerViewResult.addItemDecoration(
+                    GridSpacingItemDecoration(
+                        spanCount,
+                        binding.root.resources.getDimensionPixelSize(R.dimen.px20),
+                        true
+                    )
+                )
+                binding.recyclerViewResult.clearOnScrollListeners()
+                binding.recyclerViewResult.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                    override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                        super.onScrolled(recyclerView, dx, dy)
+                        val layoutManager =
+                            recyclerView.layoutManager as? GridLayoutManager ?: return
+                        val totalItemCount = layoutManager.itemCount
+                        val lastVisibleItem = layoutManager.findLastVisibleItemPosition()
+                        val pageState = currentPage ?: return
+                        if (
+                            totalItemCount > 0 &&
+                            pageState.hasMore &&
+                            !pageState.loading &&
+                            lastVisibleItem >= totalItemCount - 12
+                        ) {
+                            pageState.loading = true
+                            recyclerView.post {
+                                currentType?.let(onLoadMore)
+                            }
+                        }
+                    }
+                })
+                installTvFocusController()
+            }
+            submit(page)
+        }
+
+        fun submit(page: SearchResultPage) {
+            val filteredItems = ContentFilter.filterSearchItems(binding.root.context, page.items)
+            val applyUiState = {
+                val changed = currentAdapter?.setItems(filteredItems) ?: false
+                AppLog.d(TAG, "submit: type=$currentType itemCount=${filteredItems.size} changed=$changed")
+                binding.recyclerViewResult.isVisible = filteredItems.isNotEmpty()
+                binding.textEmpty.isVisible = !page.loading && filteredItems.isEmpty()
+                binding.textEmpty.setText(R.string.search_empty)
+                if (changed) {
+                    tvFocusController?.onDataChanged(TvDataChangeReason.APPEND)
+                }
+                Unit
+            }
+            if (binding.recyclerViewResult.isComputingLayout) {
+                binding.recyclerViewResult.post(applyUiState)
+            } else {
+                applyUiState()
+            }
+        }
+
+        fun submitEmpty() {
+            val applyUiState = {
+                currentAdapter?.setItems(emptyList())
+                binding.recyclerViewResult.isVisible = false
+                binding.textEmpty.isVisible = false
+            }
+            if (binding.recyclerViewResult.isComputingLayout) {
+                binding.recyclerViewResult.post(applyUiState)
+            } else {
+                applyUiState()
+            }
+        }
+
+        fun captureFocusAnchor(): Boolean {
+            return tvFocusController?.captureCurrentAnchor() ?: false
+        }
+
+        fun restoreFocusAnchor(): Boolean {
+            return tvFocusController?.restoreCapturedAnchor() == true
+        }
+
+        fun release() {
+            tvFocusController?.release()
+            tvFocusController = null
+        }
+
+        fun scrollToTop() {
+            tvFocusController?.clearAnchorForUserRefresh()
+            binding.recyclerViewResult.smoothScrollToPosition(0)
+        }
+
+        fun focusPrimaryContent(anchorView: View? = null): Boolean {
+            if (currentAdapter?.itemCount.orZero() <= 0) {
+                return false
+            }
+            if (anchorView != null) {
+                val handled = TabContentFocusHelper.requestSpatialOrPrimary(
+                    anchorView = anchorView,
+                    root = binding.recyclerViewResult,
+                    direction = View.FOCUS_DOWN
+                ) {
+                    tvFocusController?.focusPrimary() == true
+                }
+                if (handled) {
+                    return true
+                }
+            }
+            return tvFocusController?.focusPrimary() == true
+        }
+
+        private fun installTvFocusController() {
+            tvFocusController?.release()
+            val adapter = currentAdapter ?: return
+            tvFocusController = TvListFocusController(
+                recyclerView = binding.recyclerViewResult,
+                adapter = adapter,
+                strategy = GridTvFocusStrategy { currentSpanCount },
+                canLoadMore = {
+                    val page = currentPage
+                    page != null && page.hasMore
+                },
+                loadMore = loadMore@{
+                    val type = currentType ?: return@loadMore
+                    val page = currentPage ?: return@loadMore
+                    if (!page.hasMore || page.loading) {
+                        return@loadMore
+                    }
+                    page.loading = true
+                    binding.recyclerViewResult.post {
+                        onLoadMore(type)
+                    }
+                }
+            )
+        }
+    }
+
+    data class SearchResultPage(
+        val type: SearchType,
+        val title: String,
+        val items: MutableList<SearchItemModel> = mutableListOf(),
+        var loading: Boolean = false,
+        var hasMore: Boolean = true
+    )
+
+    private fun Int?.orZero(): Int = this ?: 0
+
+}

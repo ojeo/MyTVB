@@ -11,7 +11,7 @@
     android:paddingEnd="@dimen/px30"
     android:paddingBottom="@dimen/px10">
 
-    <com.tutu.myblbl.core.ui.image.AvatarBadgeView
+    <com.mytvb.core.ui.image.AvatarBadgeView
         android:id="@+id/image_view"
         android:layout_width="match_parent"
         android:layout_height="0dp"

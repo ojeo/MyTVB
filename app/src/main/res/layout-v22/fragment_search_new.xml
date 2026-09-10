@@ -63,7 +63,7 @@
             android:textSize="@dimen/px28"
             android:textStyle="bold"/>
     </androidx.appcompat.widget.LinearLayoutCompat>
-    <com.tutu.myblbl.feature.search.view.KeyboardView
+    <com.mytvb.feature.search.view.KeyboardView
         android:id="@+id/view_keyboard"
         android:clipChildren="false"
         android:layout_width="0dp"

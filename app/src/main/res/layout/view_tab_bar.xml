@@ -110,7 +110,7 @@
         app:layout_constraintTop_toBottomOf="@+id/button_cctv_live"
         app:srcCompat="@drawable/tab_me"
         app:tint="?attr/tabBarNormal"/>
-    <com.tutu.myblbl.core.ui.image.AvatarBadgeView
+    <com.mytvb.core.ui.image.AvatarBadgeView
         android:id="@+id/image_avatar"
         android:background="@drawable/tab_round_background"
         android:padding="@dimen/px10"

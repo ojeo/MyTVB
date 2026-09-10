@@ -117,7 +117,7 @@
         app:srcCompat="@drawable/ic_favorite"
         app:tint="?android:attr/textColorPrimary" />
 
-    <com.tutu.myblbl.ui.widget.TripleActionProgressView
+    <com.mytvb.ui.widget.TripleActionProgressView
         android:id="@+id/view_triple_progress"
         android:layout_width="0dp"
         android:layout_height="0dp"
@@ -143,7 +143,7 @@
         app:layout_constraintStart_toEndOf="@+id/card_cover"
         app:layout_constraintTop_toTopOf="@+id/card_cover">
 
-        <com.tutu.myblbl.core.ui.image.AvatarBadgeView
+        <com.mytvb.core.ui.image.AvatarBadgeView
             android:id="@+id/image_avatar"
             android:layout_width="@dimen/px70"
             android:layout_height="@dimen/px70"

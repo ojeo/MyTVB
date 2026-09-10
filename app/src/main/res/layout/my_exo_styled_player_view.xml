@@ -37,12 +37,12 @@
             android:layout_height="@dimen/exo_error_message_height"
             android:layout_marginBottom="@dimen/exo_error_message_margin_bottom"/>
     </androidx.media3.ui.AspectRatioFrameLayout>
-    <com.tutu.myblbl.feature.player.view.DanmakuMaskHostLayout
+    <com.mytvb.feature.player.view.DanmakuMaskHostLayout
         android:id="@+id/dmk_mask_host"
         android:layout_gravity="top"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
-    <com.tutu.myblbl.feature.player.interaction.InteractionOverlayView
+    <com.mytvb.feature.player.interaction.InteractionOverlayView
         android:id="@+id/interaction_view"
         android:visibility="gone"
         android:layout_width="match_parent"
@@ -69,7 +69,7 @@
         android:visibility="gone"
         android:layout_width="match_parent"
         android:layout_height="match_parent"/>
-    <com.tutu.myblbl.feature.player.view.MyPlayerSettingView
+    <com.mytvb.feature.player.view.MyPlayerSettingView
         android:id="@+id/setting_view"
         android:visibility="gone"
         android:layout_width="match_parent"

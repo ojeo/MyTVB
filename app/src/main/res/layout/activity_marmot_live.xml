@@ -86,7 +86,7 @@
         android:visibility="gone">
 
         <!-- 左侧：分组列表（央视/卫视/地方台...）FocusLockRecyclerView 防焦点溢出 -->
-        <com.tutu.myblbl.core.ui.focus.FocusLockRecyclerView
+        <com.mytvb.core.ui.focus.FocusLockRecyclerView
             android:id="@+id/group_list"
             android:layout_width="140dp"
             android:layout_height="match_parent"
@@ -99,7 +99,7 @@
             android:padding="8dp" />
 
         <!-- 右侧：频道列表 -->
-        <com.tutu.myblbl.core.ui.focus.FocusLockRecyclerView
+        <com.mytvb.core.ui.focus.FocusLockRecyclerView
             android:id="@+id/channel_list"
             android:layout_width="300dp"
             android:layout_height="match_parent"
