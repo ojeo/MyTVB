@@ -3,6 +3,7 @@ package com.mytvb.feature.player.view
 import android.content.Context
 import com.mytvb.core.common.settings.AppSettingsDataStore
 import com.mytvb.feature.player.danmaku.DanmakuRenderEngine
+import com.mytvb.feature.player.danmaku.DanmakuRenderQuality
 import com.mytvb.feature.player.danmaku.DanmakuTrackSpacing
 import com.mytvb.model.dm.DmScreenArea
 import org.koin.mp.KoinPlatform
@@ -28,6 +29,15 @@ internal class MyPlayerSettingPreferenceStore(
     fun getRenderEngine(): DanmakuRenderEngine =
         DanmakuRenderEngine.fromPref(
             appSettings.getCachedString(MyPlayerSettingView.KEY_DM_RENDER_ENGINE)
+        )
+
+    /**
+     * 读取全局弹幕渲染质量（"高清" / "均衡" / "流畅优先"）。仅在 APP设置-弹幕设置中可调。
+     * 与渲染引擎一样在弹幕层创建时确定，下一次进入播放页生效。
+     */
+    fun getRenderQuality(): DanmakuRenderQuality =
+        DanmakuRenderQuality.fromPref(
+            appSettings.getCachedString(MyPlayerSettingView.KEY_DM_RENDER_QUALITY)
         )
 
     fun loadDanmakuState(

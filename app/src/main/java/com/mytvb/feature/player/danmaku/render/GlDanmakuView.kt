@@ -42,6 +42,8 @@ import com.mytvb.feature.player.danmaku.clock.PresentationTimestampResolver
 import com.mytvb.feature.player.danmaku.clock.RenderClockDriver
 import com.mytvb.feature.player.danmaku.clock.projectSample
 import com.mytvb.feature.player.danmaku.common.BiliDanmakuStyle
+import com.mytvb.feature.player.danmaku.common.MIN_DANMAKU_BAND_FRACTION
+import com.mytvb.feature.player.danmaku.common.danmakuBandHeightPx
 import com.mytvb.feature.player.danmaku.emote.DanmakuEmoteRepository
 import com.mytvb.feature.player.danmaku.model.DanmakuKind
 import com.mytvb.feature.player.view.DanmakuMaskHostLayout
@@ -102,6 +104,14 @@ class GlDanmakuView @JvmOverloads constructor(
         private const val IDLE_MIN_WAKE_MS = 16L
         /** 休眠自醒上限：nextWakeAtMs 缺失或过远时的兜底，限制最坏情况下的入场延迟。 */
         private const val IDLE_MAX_WAKE_MS = 500L
+
+        // ---- 保播放降载 ----
+        /** 视频帧率判定窗口（与性能采样周期一致）。 */
+        private const val LOAD_GUARD_WINDOW_MS = 3_000L
+        /** 降载允许的最低光栅化分辨率系数。 */
+        private const val MIN_RENDER_SCALE = 0.5f
+        /** Debug Overlay 在窄 band 下的最小压缩比（再小就彻底看不清了）。 */
+        private const val DIAG_MIN_FIT = 0.35f
 
         // ---- Debug Overlay ----
         private const val DIAG_RING_CAPACITY = 600
@@ -227,7 +237,29 @@ class GlDanmakuView @JvmOverloads constructor(
             Configuration.UI_MODE_TYPE_TELEVISION ||
             (resources.configuration.touchscreen == Configuration.TOUCHSCREEN_NOTOUCH &&
                 resources.configuration.navigation == Configuration.NAVIGATION_DPAD)
-    private val targetRenderFps = 60
+    /**
+     * 弹幕渲染帧率节流器。此前这里只有一个 `targetRenderFps = 60` 的日志字段，
+     * 弹幕层恒定按 vsync 提交；保播放降载需要它真实生效。
+     */
+    private val renderPacer = DanmakuRenderPacer()
+
+    // ---- 保播放降载（视频帧率驱动）----
+    /** 判定器，只在主线程（provider 100ms 采样点）驱动。 */
+    private val loadGuard = DanmakuLoadGuard()
+    /** 已落地的档位，用于幂等判断（主线程读写）。 */
+    private var appliedLoadLevel = DanmakuLoadLevel.NORMAL
+    private var lastLoadGuardEvalUptimeMs = 0L
+    /**
+     * 降载最后一档：整层停渲染。View 置 GONE 后 Surface 随之销毁、EGL 释放，
+     * 透明全屏 Surface 从 SurfaceFlinger 的合成列表里彻底摘除——这是唯一能
+     * 真正消掉"每帧多混合一整屏"的手段。
+     */
+    private var guardSuspendsLayer = false
+    /**
+     * 播放器/控制器下发的可见性诉求（弹幕开关）。与降载诉求分开保存，
+     * 避免降载停渲染的层被一次 syncDanmakuSettings 又拉回可见。
+     */
+    private var renderVisibilityRequested = true
 
     // ---- GL 状态（RenderThread 独占）----
     private var egl: GlEglHelper? = null
@@ -252,7 +284,38 @@ class GlDanmakuView @JvmOverloads constructor(
     // TV 透明 Surface 需要每秒清空并合成整张 RGBA buffer。内部按 0.75 等比例渲染可减少
     // 43.75% 像素填充；View/逻辑视口仍是完整 1920x1080，因此横纵缩放一致，不会再出现
     // 早期“只缩内容 band”导致的字体纵向压扁。手机/平板保留原生分辨率。
-    private val renderScale = if (isTvLikeDevice) 0.75f else 1.0f
+    /** 设备基准光栅化分辨率：TV 弱机 0.75，手机/平板 1.0。 */
+    private val deviceRenderScale = if (isTvLikeDevice) 0.75f else 1.0f
+
+    /** 基准 = 设备基准 × 用户「弹幕渲染质量」系数，且不低于 [MIN_RENDER_SCALE]。 */
+    private var baseRenderScale = deviceRenderScale
+
+    /**
+     * 当前生效的光栅化分辨率系数 = [baseRenderScale] × 降载档位系数。
+     * 只在主线程（onMeasure 与降载落地）读写，故不加 @Volatile。
+     * 变更只影响 producer buffer 尺寸（onMeasure 里的 setFixedSize），
+     * 逻辑视口与投影保持全屏不变，横纵等比，不会压扁字体。
+     */
+    private var renderScale = baseRenderScale
+
+    /**
+     * 直播 band 模式：弹幕层 View / Surface 只覆盖屏幕上方的弹幕区域（占屏高 fraction），
+     * 而不是整屏透明 Surface。fraction ≥ 1 = 关闭（行为与改造前一致）。
+     *
+     * 为什么能省这么多：透明 Surface 的每一帧都要参与 SurfaceFlinger 的全屏 GPU 混合，
+     * 成本与"层面积"成正比，而不是与"实际画了多少弹幕"成正比。默认弹幕区域是半屏/四分之一，
+     * 全屏 buffer 意味着其中大部分像素恒为全透明却仍在逐帧混合。
+     *
+     * 正确性前提（早期"只缩内容 band"失败的教训）：**View 矩形本身要收缩到 band**，
+     * 而不是只缩 producer buffer。只缩 buffer 时 SurfaceFlinger 会把 band buffer 拉伸回
+     * 全屏矩形，纵向被额外降采样 → 横清竖糊。View 也收缩后，buffer → View 矩形仍是等比缩放。
+     * 同理引擎视口高度也变成 band 高度，所以必须把引擎的占屏比例覆盖为 100%，
+     * 否则会在 band 内二次收缩（见 DanmakuEngine.setViewportAreaOverride）。
+     *
+     * 只在直播启用：点播的防挡蒙版路径不参与本变更。
+     */
+    private var liveBandFraction = 1f
+
     @Volatile private var released = false
     private var renderLoopRunning = false
     private val frameCallback = FrameCallback()
@@ -381,8 +444,61 @@ class GlDanmakuView @JvmOverloads constructor(
     override val renderView: View get() = this
 
     override fun setRenderVisible(visible: Boolean) {
+        renderVisibilityRequested = visible
+        applyLayerVisibility()
+    }
+
+    /**
+     * 最终可见性 = 播放器/控制器的诉求 ∧ 保播放降载未要求停渲染。
+     * 两处诉求分离保存，避免降载停渲染的层被一次 syncDanmakuSettings 又拉回可见。
+     */
+    private fun applyLayerVisibility() {
+        val visible = renderVisibilityRequested && !guardSuspendsLayer
         super.setVisibility(if (visible) View.VISIBLE else View.GONE)
         if (visible) requestRenderFrame()
+    }
+
+    override fun setLoadSheddingScale(scale: Float) {
+        engine.setLoadSheddingScale(scale)
+    }
+
+    /**
+     * 直播 band 模式：收敛/恢复弹幕层的覆盖区域（详见 [liveBandFraction]）。
+     * 主线程调用（View 几何 + 引擎配置）；幂等。
+     */
+    override fun setLiveBandFraction(fraction: Float) {
+        val clamped = fraction.coerceIn(MIN_DANMAKU_BAND_FRACTION, 1f)
+        if (kotlin.math.abs(clamped - liveBandFraction) < 0.001f) return
+        liveBandFraction = clamped
+        // band 模式下引擎视口高度已代表"弹幕区域"，占屏比例必须按 100% 处理，否则二次收缩。
+        engine.setViewportAreaOverride(if (clamped >= 1f) 0f else 1f)
+        // View 高度变化 → onMeasure 重算 View 几何与 buffer 尺寸（setFixedSize）。
+        requestLayout()
+        if (AppLog.isEnabled) {
+            AppLog.i(TAG, "live band fraction -> $clamped")
+        }
+    }
+
+    /**
+     * 应用用户「弹幕渲染质量」系数（相对设备基准分辨率）。
+     *
+     * 必须在**首轮 measure / Surface buffer 分配之前**调用（与弹幕区域同理），否则会触发
+     * 运行期的 `setFixedSize` 改缓冲区尺寸——部分设备会拒收旧尺寸缓冲并留下透明空层。
+     * 若在会话中途调用（不应发生），这里退化为一次 `requestLayout`。
+     */
+    fun setRenderQualityScale(scale: Float) {
+        val clamped = scale.coerceIn(MIN_RENDER_SCALE, 1f)
+        val nextBase = (deviceRenderScale * clamped).coerceAtLeast(MIN_RENDER_SCALE)
+        if (kotlin.math.abs(nextBase - baseRenderScale) < 0.001f) return
+        baseRenderScale = nextBase
+        // 当前 renderScale 也要跟着基准走：降载档位的相对系数保持不变。
+        val level = appliedLoadLevel
+        renderScale = (baseRenderScale * level.renderScaleFactor)
+            .coerceIn(minOf(MIN_RENDER_SCALE, baseRenderScale), baseRenderScale)
+        requestLayout()
+        if (AppLog.isEnabled) {
+            AppLog.i(TAG, "render quality scale -> $clamped base=$baseRenderScale renderScale=$renderScale")
+        }
     }
 
     // ========== SurfaceHolder.Callback ==========
@@ -403,24 +519,30 @@ class GlDanmakuView @JvmOverloads constructor(
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        val fullWidth = MeasureSpec.getSize(widthMeasureSpec).coerceAtLeast(0)
-        val fullHeight = MeasureSpec.getSize(heightMeasureSpec).coerceAtLeast(0)
-        logicalViewportWidth = fullWidth
-        logicalViewportHeight = fullHeight
-        if (fullWidth <= 0 || fullHeight <= 0) {
-            setMeasuredDimension(fullWidth, fullHeight)
+        val availableWidth = MeasureSpec.getSize(widthMeasureSpec).coerceAtLeast(0)
+        val availableHeight = MeasureSpec.getSize(heightMeasureSpec).coerceAtLeast(0)
+        if (availableWidth <= 0 || availableHeight <= 0) {
+            logicalViewportWidth = availableWidth
+            logicalViewportHeight = availableHeight
+            setMeasuredDimension(availableWidth, availableHeight)
             return
         }
 
-        // View 几何、逻辑视口与 producer buffer 三者都保持全屏，仅由 renderScale 决定
-        // 实际光栅化分辨率。buffer 尺寸不再随"弹幕区域 area"变化，从而：
-        // - 横纵向解析度恒等于 renderScale，不因 area 调小而纵向发虚；
-        // - 调 area / 开关 Debug Overlay 不再触发 setFixedSize，减少 Surface 重建。
-        renderViewportWidth = fullWidth
-        renderViewportHeight = fullHeight
-        setMeasuredDimension(fullWidth, fullHeight)
-        val targetBufferWidth = (fullWidth * renderScale).roundToInt().coerceAtLeast(1)
-        val targetBufferHeight = (fullHeight * renderScale).roundToInt().coerceAtLeast(1)
+        // 直播 band 模式：View 矩形收缩到弹幕区域（不是只缩 buffer，否则纵向会被拉伸发虚，
+        // 见 liveBandFraction 注释）；非 band 模式下 height == availableHeight，行为不变。
+        val width = availableWidth
+        val height = danmakuBandHeightPx(availableHeight, liveBandFraction)
+
+        // View 几何、逻辑视口与 producer buffer 三者比例一致，仅由 renderScale 决定
+        // 实际光栅化分辨率。buffer 尺寸不随"弹幕区域 area"变化（band 模式下 area 已体现在
+        // View 高度里），从而横纵向解析度恒等于 renderScale，不会纵向发虚。
+        logicalViewportWidth = width
+        logicalViewportHeight = height
+        renderViewportWidth = width
+        renderViewportHeight = height
+        setMeasuredDimension(width, height)
+        val targetBufferWidth = (width * renderScale).roundToInt().coerceAtLeast(1)
+        val targetBufferHeight = (height * renderScale).roundToInt().coerceAtLeast(1)
         if (targetBufferWidth != fixedBufferWidth || targetBufferHeight != fixedBufferHeight) {
             fixedBufferWidth = targetBufferWidth
             fixedBufferHeight = targetBufferHeight
@@ -556,10 +678,16 @@ class GlDanmakuView @JvmOverloads constructor(
 
     /** Debug Overlay：左上角半透明面板，绘制渲染统计（方案 §70）。 */
     private fun drawDiagnosticOverlay(canvas: Canvas, snap: GlDiagnosticSnapshot) {
-        val lineH = dp(18f).toFloat()
         val padding = dp(8f).toFloat()
+        // 直播 band 模式下 View 高度可能只有屏高的 1/8，面板必须等比压缩才画得下
+        // （否则整块被裁掉，现场无法读取 load= / vFps= 等关键指标）。
+        val fit = (
+            (height.toFloat() - padding * 2f) / (dp(18f).toFloat() * DIAG_LINE_COUNT)
+            ).coerceIn(DIAG_MIN_FIT, 1f)
+        val lineH = dp(18f).toFloat() * fit
         val panelW = dp(360f).toFloat()
         val panelH = lineH * DIAG_LINE_COUNT + padding * 2f
+        diagTextPaint.textSize = dp(14f).toFloat() * fit
         canvas.drawRect(0f, 0f, panelW, panelH, diagBgPaint)
         val sb = StringBuilder(96)
         var y = padding + lineH
@@ -741,9 +869,65 @@ class GlDanmakuView @JvmOverloads constructor(
                 config = runCatching { configProvider?.invoke() }.getOrNull() ?: previous.config,
             )
         providerSnapshot = next
+        maybeEvaluateLoadGuard(next)
         // area 已不再参与 measure（buffer 恒为全屏），改弹幕区域无需 requestLayout。
         // 空闲休眠期间不强制唤醒：定时唤醒（或真实数据/seek 事件）负责恢复渲染循环。
         if (providerSnapshot.isPlaying || providerSnapshot.playWhenReady) requestRenderFrameIfRunning()
+    }
+
+    /**
+     * 保播放降载判定（主线程）。以 [LOAD_GUARD_WINDOW_MS] 为周期，用视频帧率相对本机
+     * 基线的比值决定是否收紧弹幕负载；弹幕开关关闭时重置为满血。
+     *
+     * 为什么挂在 provider 采样点上而不是渲染循环里：采样点每 100ms 必达且不依赖渲染
+     * 循环存活——最后一档会停掉渲染循环并销毁 Surface，若判定只在 RenderThread 里做，
+     * 降载后就再也无法自行恢复了。
+     */
+    private fun maybeEvaluateLoadGuard(snapshot: ProviderSnapshot) {
+        if (released) return
+        val now = SystemClock.uptimeMillis()
+        if (now - lastLoadGuardEvalUptimeMs < LOAD_GUARD_WINDOW_MS) return
+        lastLoadGuardEvalUptimeMs = now
+        if (!snapshot.config.enabled) {
+            // 弹幕已关闭（无负载可言）：清空基线，下次开启重新建立能力基线。
+            loadGuard.reset()
+            applyLoadLevel(DanmakuLoadLevel.NORMAL)
+            return
+        }
+        val videoFps = videoFpsProvider?.invoke() ?: 0f
+        val next = loadGuard.onWindow(videoFps = videoFps, isPlaying = snapshot.isPlaying) ?: return
+        applyLoadLevel(next)
+    }
+
+    /** 落地一个降载档位：渲染帧率 + 引擎同屏上限 + 光栅化分辨率 + 建图退让 + （最后一档）整层停渲染。 */
+    private fun applyLoadLevel(level: DanmakuLoadLevel) {
+        if (appliedLoadLevel == level) return
+        appliedLoadLevel = level
+        renderPacer.targetFps = level.renderFps
+        engine.setLoadSheddingScale(level.onScreenScale)
+        cacheManager.setLowPriority(level.lowPriorityCache)
+        // 下限取 min()：即便 baseRenderScale 被外部调到下限以下，也不会触发
+        // coerceIn(min > max) 抛 IllegalArgumentException。
+        val targetScale = (baseRenderScale * level.renderScaleFactor)
+            .coerceIn(minOf(MIN_RENDER_SCALE, baseRenderScale), baseRenderScale)
+        val scaleChanged = kotlin.math.abs(targetScale - renderScale) > 0.001f
+        if (scaleChanged) {
+            renderScale = targetScale
+            // buffer 尺寸在 onMeasure 里落地（holder.setFixedSize），必须重走一次布局。
+            requestLayout()
+        }
+        guardSuspendsLayer = level.suspendLayer
+        applyLayerVisibility()
+        if (!level.suspendLayer) requestRenderFrame()
+        if (AppLog.isEnabled) {
+            AppLog.i(
+                TAG,
+                "load guard -> ${level.name} videoFps=${fmt1(videoFpsProvider?.invoke() ?: 0f)} " +
+                    "baseline=${fmt1(loadGuard.baselineFps)} renderFps=${level.renderFps} " +
+                    "onScreenScale=${level.onScreenScale} renderScale=$targetScale" +
+                    if (scaleChanged) " (buffer resized)" else ""
+            )
+        }
     }
 
     private fun updateUiFrameMonitor(enabled: Boolean) {
@@ -1108,6 +1292,21 @@ class GlDanmakuView @JvmOverloads constructor(
             removeFrameCallback(frameCallback)
             postFrameCallback(frameCallback)
         }
+        // vsync 节拍统计必须放在节流过滤之前：它衡量的是"渲染循环有没有按时拿到 vsync"，
+        // 与"本帧是否提交"无关。放在 doRenderFrame 内会把 30fps 档正常的 33ms 间隔
+        // 误报成 vsync gap，污染这一项验收指标。
+        if (perfLastFrameTimeNs != Long.MIN_VALUE && frameTimeNanos > perfLastFrameTimeNs) {
+            val intervalNs = frameTimeNanos - perfLastFrameTimeNs
+            perfAccumFrameIntervalNs += intervalNs
+            if (intervalNs > perfMaxFrameIntervalNs) perfMaxFrameIntervalNs = intervalNs
+            perfFrameIntervalCount++
+            if (intervalNs >= VSYNC_GAP_THRESHOLD_NS) perfVsyncGapCount++
+        }
+        perfLastFrameTimeNs = frameTimeNanos
+        // 保播放降载：目标帧率以下的 vsync 只续帧、不提交，把弹幕层的提交频率压下来。
+        // 位置由时钟层按真实时间推进，跳帧不会造成时间倒流，只是单帧位移变大。
+        // 收尾动作（暂停冻结 / 关闭弹幕清屏）都在 doRenderFrame 内，最坏被推迟一帧（≤33ms）。
+        if (!renderPacer.shouldRender(frameTimeNanos)) return
         try {
             doRenderFrame(frameTimeNanos)
         } catch (t: Throwable) {
@@ -1123,14 +1322,6 @@ class GlDanmakuView @JvmOverloads constructor(
      */
     private fun doRenderFrame(frameTimeNanos: Long) {
         val perfStartNs = System.nanoTime()
-        if (perfLastFrameTimeNs != Long.MIN_VALUE && frameTimeNanos > perfLastFrameTimeNs) {
-            val intervalNs = frameTimeNanos - perfLastFrameTimeNs
-            perfAccumFrameIntervalNs += intervalNs
-            if (intervalNs > perfMaxFrameIntervalNs) perfMaxFrameIntervalNs = intervalNs
-            perfFrameIntervalCount++
-            if (intervalNs >= VSYNC_GAP_THRESHOLD_NS) perfVsyncGapCount++
-        }
-        perfLastFrameTimeNs = frameTimeNanos
         val sampled = providerSnapshot
         val cfg = sampled.config
         if (cfg != lastConfig) {
@@ -1294,12 +1485,16 @@ class GlDanmakuView @JvmOverloads constructor(
                 val clockDiag = clockDriver.diagnostics()
                 AppLog.i(
                     TAG,
+                    // fps = 实际提交帧率（受 targetFps 节流影响）；vsync = 渲染循环拿到 vsync
+                    // 的节拍（不受节流影响），两者相差即为节流生效的幅度。
                     "perf fps=${String.format(Locale.US, "%.1f", count.toFloat() * 1000f / PERF_LOG_INTERVAL_MS)} " +
                         "avg=${String.format(Locale.US, "%.2f", avgMs)}ms " +
                         "swap=${String.format(Locale.US, "%.2f", avgSwapMs)}/${String.format(Locale.US, "%.2f", perfMaxSwapNs / 1_000_000.0)}ms " +
                         "max=${String.format(Locale.US, "%.2f", perfMaxFrameNs / 1_000_000.0)}ms " +
-                        "cadence=${String.format(Locale.US, "%.2f", avgCadenceMs)}/${String.format(Locale.US, "%.2f", perfMaxFrameIntervalNs / 1_000_000.0)}ms " +
-                        "targetFps=$targetRenderFps vsyncGaps=$perfVsyncGapCount " +
+                        "vsync=${String.format(Locale.US, "%.2f", avgCadenceMs)}/${String.format(Locale.US, "%.2f", perfMaxFrameIntervalNs / 1_000_000.0)}ms " +
+                        "targetFps=${renderPacer.targetFps} vsyncGaps=$perfVsyncGapCount " +
+                        "load=${appliedLoadLevel.name} vFps=${fmt1(videoFpsProvider?.invoke() ?: 0f)} " +
+                        "vBase=${fmt1(loadGuard.baselineFps)} " +
                         "active=${r.lastDrawnInstanceCount} snapshot=${snapshot.count} atlasPages=${a.pageCount()} " +
                         "drawCalls=${r.lastDrawCallCount} " +
                         "clock=${clockDiag.state}/${clockDiag.decision} " +

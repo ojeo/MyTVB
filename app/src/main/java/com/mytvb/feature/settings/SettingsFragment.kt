@@ -37,6 +37,7 @@ import com.mytvb.core.ui.image.ImageLoader
 import com.mytvb.core.ui.navigation.navigateBackFromUi
 import com.mytvb.core.ui.system.ScreenUtils
 import com.mytvb.feature.player.PlayerInstancePool
+import com.mytvb.feature.player.danmaku.DanmakuRenderQuality
 import com.mytvb.feature.player.VideoPlayerViewModel
 import com.mytvb.feature.player.cache.PlayerMediaCache
 import com.mytvb.feature.player.sponsor.SponsorBlockRepository
@@ -114,6 +115,7 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
         private const val KEY_DM_MERGE_DUPLICATE = "dm_merge_duplicate"
         private const val KEY_DM_SMART_SHIELD = "dm_smart_shield"
         private const val KEY_DM_RENDER_ENGINE = "dm_render_engine"
+        private const val KEY_DM_RENDER_QUALITY = "dm_render_quality"
         private const val KEY_GAIA_VGATE_V_VOUCHER = "gaia_vgate_v_voucher"
         private const val KEY_GAIA_VGATE_V_VOUCHER_SAVED_AT_MS = "gaia_vgate_v_voucher_saved_at_ms"
         private const val KEY_IPV4_ONLY = "ipv4_only"
@@ -132,6 +134,14 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
          * 切换在下一次进入播放页时生效（播放器 setup 时创建弹幕层，无需重建运行时）。
          */
         private val DM_RENDER_ENGINE_OPTIONS = arrayOf("GPU引擎", "轻量化引擎")
+
+        /**
+         * 弹幕渲染质量选项：直接由 [DanmakuRenderQuality] 派生，避免枚举 prefValue 与
+         * 设置页选项两处各写一份后失配（失配会导致读取时静默回退默认档）。
+         * 高清 = 设备基准分辨率（等价改造前行为）；均衡/流畅优先逐级降低弹幕层填充率，
+         * 弱机上用弹幕清晰度换视频流畅度。同样在下一次进入播放页生效。
+         */
+        private val DM_RENDER_QUALITY_OPTIONS = DanmakuRenderQuality.OPTIONS
 
         /**
          * 青少年模式-单次观看时长/休息时长选项：0=不限制，1 分钟为测试用，之后步进 10 分钟，最长 120 分钟。
@@ -269,7 +279,8 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
             SettingModel(getString(R.string.dm_merge_duplicate), "开"),
             SettingModel(getString(R.string.dm_smart_shield), "关"),
             SettingModel(getString(R.string.show_dm_switch), "关"),
-            SettingModel(getString(R.string.dm_render_engine), DM_RENDER_ENGINE_OPTIONS.first())
+            SettingModel(getString(R.string.dm_render_engine), DM_RENDER_ENGINE_OPTIONS.first()),
+            SettingModel(getString(R.string.dm_render_quality), DM_RENDER_QUALITY_OPTIONS.first())
         )
 
         deviceSettings.add(DEVICE_POSITION_VERSION, SettingModel("应用版本", BuildConfig.VERSION_NAME))
@@ -612,6 +623,8 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
             12 -> toggleSetting(dmSettings, 12, KEY_SHOW_DM_SWITCH)
             // 13: 弹幕渲染引擎（GPU / 轻量化 Canvas）。仅落盘，下一次进入播放页生效。
             13 -> showDmChoiceDialog(position, KEY_DM_RENDER_ENGINE, DM_RENDER_ENGINE_OPTIONS)
+            // 14: 弹幕渲染质量（高清 / 均衡 / 流畅优先）。仅落盘，下一次进入播放页生效。
+            14 -> showDmChoiceDialog(position, KEY_DM_RENDER_QUALITY, DM_RENDER_QUALITY_OPTIONS)
         }
     }
 
@@ -1137,6 +1150,10 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
         applySavedValue(dmSettings, 13, KEY_DM_RENDER_ENGINE)
         if (dmSettings[13].info !in DM_RENDER_ENGINE_OPTIONS) {
             dmSettings[13].info = DM_RENDER_ENGINE_OPTIONS.first()
+        }
+        applySavedValue(dmSettings, 14, KEY_DM_RENDER_QUALITY)
+        if (dmSettings[14].info !in DM_RENDER_QUALITY_OPTIONS) {
+            dmSettings[14].info = DM_RENDER_QUALITY_OPTIONS.first()
         }
     }
 

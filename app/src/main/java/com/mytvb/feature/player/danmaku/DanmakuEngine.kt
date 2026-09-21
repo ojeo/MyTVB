@@ -230,11 +230,42 @@ internal class DanmakuEngine(
         refreshHz = displayRefreshHz,
     )
 
-    private fun maxOnScreenLimit(cfg: DanmakuConfig): Int =
-        when {
-            cfg.maxOnScreen > 0 -> cfg.maxOnScreen
-            else -> adaptiveOnScreenLimit.limit
-        }
+    /**
+     * 保播放降载系数（1.0 = 不降载）。渲染宿主在视频帧率被弹幕拖累时下调，
+     * 临时收紧同屏上限；恢复后还原。
+     *
+     * 语义：用户显式配置的 maxOnScreen 也会被缩放——这是"保视频"优先于"密度偏好"
+     * 的取舍；缩放有下限 [MIN_LOAD_SHEDDING_ON_SCREEN]，不会把弹幕压到看不见。
+     * 写方为主线程（渲染宿主），读方为 action 线程（[act]），故 @Volatile。
+     */
+    @Volatile
+    private var loadSheddingScale: Float = 1f
+
+    fun setLoadSheddingScale(scale: Float) {
+        loadSheddingScale = scale.coerceIn(MIN_LOAD_SHEDDING_SCALE, 1f)
+    }
+
+    private fun maxOnScreenLimit(cfg: DanmakuConfig): Int {
+        val base = if (cfg.maxOnScreen > 0) cfg.maxOnScreen else adaptiveOnScreenLimit.limit
+        val scale = loadSheddingScale
+        if (scale >= 1f) return base
+        return (base * scale).toInt().coerceAtLeast(MIN_LOAD_SHEDDING_ON_SCREEN)
+    }
+
+    /**
+     * 视口纵向占比覆盖（≤0 = 不覆盖，使用 `cfg.area`）。
+     *
+     * 用于 GPU 直播 band 模式：弹幕层 Surface 只覆盖屏幕上方的弹幕区域时，
+     * 隧道进来的视口高度本身就是 band 高度，此时"占屏比例"必须按 100% 处理，
+     * 否则会在 band 内二次收缩（弹幕只出现在 band 的上半部分）。
+     * 密度预算仍按用户原始比例 × 屏高计算，与 band 高度一致，无需感知本开关。
+     */
+    @Volatile
+    private var viewportAreaOverride: Float = 0f
+
+    fun setViewportAreaOverride(area: Float) {
+        viewportAreaOverride = area.coerceIn(0f, 1f)
+    }
 
     // ---- Data ----
     private val actionStateLock = Any()
@@ -691,7 +722,9 @@ internal class DanmakuEngine(
             // factor<1 时 laneHeight<textBoxHeight，吃掉 fontMetrics 度量留白使同屏容纳更多行；
             // 下限 0.65×textBoxHeight 保证相邻 lane 字形不重叠。
             val laneHeight = (textBoxHeight * cfg.trackSpacing.factor).coerceAtLeast(textBoxHeight * 0.65f)
-            val usableHeight = (availableHeight * cfg.area.coerceIn(0f, 1f)).toInt().coerceAtLeast(0)
+            // band 模式（见 setViewportAreaOverride）下占屏比例按 100% 处理。
+            val areaFraction = viewportAreaOverride.takeIf { it > 0f } ?: cfg.area
+            val usableHeight = (availableHeight * areaFraction.coerceIn(0f, 1f)).toInt().coerceAtLeast(0)
             val laneCount = max(1, (usableHeight / laneHeight).toInt())
             val maxYTop = (topInset + usableHeight - textBoxHeight).toFloat().coerceAtLeast(topInset.toFloat())
 
@@ -2455,15 +2488,24 @@ internal class DanmakuEngine(
         /**
          * 同屏弹幕数上限自适应档：种子值（自适应会按帧率在 [ADAPTIVE_FLOOR]～
          * [ADAPTIVE_CEILING] 间自动增减，见 AdaptiveOnScreenLimit）。
-         * 相比旧值（TV 100 / 其他 160）上调，缓解"弹幕变稀"的体感；GPU 引擎能力更强，
-         * 可承担更高同屏（自适应仍会按渲染帧率自动下调兜底）。
+         * TV 种子从 140 下调到 120：直播场景下起播瞬间（解码预热 + 弹幕洪峰同帧）
+         * 最容易被高密度压垮，降低起点相当于给自适应留出爬升空间，攀升速率
+         * （32 条/5s）足以在十几秒内回到硬顶，能力足够的设备几乎无感。
          */
-        private const val DEFAULT_TV_MAX_ON_SCREEN = 140
+        private const val DEFAULT_TV_MAX_ON_SCREEN = 120
         private const val DEFAULT_MAX_ON_SCREEN = 200
 
-        /** 自适应同屏上限的下限/硬顶。 */
-        private const val ADAPTIVE_FLOOR = 100
+        /**
+         * 自适应同屏上限的下限/硬顶。
+         * 下限从 100 下调到 48：弱机上 100 条带描边位图的 alpha 混合已足以吃掉
+         * 视频解码的 GPU 余量，下限过高会让自适应"无档可降"，只能靠保播放降载兜底。
+         */
+        private const val ADAPTIVE_FLOOR = 48
         private const val ADAPTIVE_CEILING = 400
+
+        /** 保播放降载的系数下限与同屏条数下限（见 [setLoadSheddingScale]）。 */
+        private const val MIN_LOAD_SHEDDING_SCALE = 0.25f
+        private const val MIN_LOAD_SHEDDING_ON_SCREEN = 24
 
         /**
          * 同屏软上限之上允许的即时入场余量：满员时若轨道恰好可用，仍可入场至该硬顶。

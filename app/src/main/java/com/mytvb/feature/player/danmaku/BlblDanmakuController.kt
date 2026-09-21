@@ -17,6 +17,7 @@ import com.mytvb.feature.player.danmaku.common.DanmakuUserFilterRepository
 import com.mytvb.feature.player.danmaku.common.LiveDanmakuBatcher
 import com.mytvb.feature.player.danmaku.common.LiveDanmakuController
 import com.mytvb.feature.player.danmaku.common.VipDanmakuTextureCache
+import com.mytvb.feature.player.danmaku.common.danmakuAreaFraction
 import com.mytvb.feature.player.danmaku.common.nextDanmakuPreparationGeneration
 import com.mytvb.model.dm.DmModel
 import kotlinx.coroutines.Job
@@ -61,7 +62,12 @@ class BlblDanmakuController(
          */
         private const val BILI_BASE_FONT_SIZE = 25f
         private const val DANMAKU_FONT_BORDER_DEFAULT = 0
-        private const val LIVE_HISTORY_MAX_ITEMS = 2_000
+        /**
+         * 直播时间线保留上限。原 2000：直播是"即时消费"，超出屏幕寿命的历史没有价值，
+         * 但每次 append 之后的 trimToMax 都要在 ArrayList 头部搬移元素——直播每 50ms
+         * 一次 append，长直播下这笔拷贝是持续开销。降到 500 后单次搬迁量降为 1/4。
+         */
+        private const val LIVE_HISTORY_MAX_ITEMS = 500
         private const val LIVE_EMIT_BATCH_MS = 50L
         private const val TAIL_PATCH_MERGE_WINDOW_MS = 2_000
 
@@ -127,6 +133,9 @@ class BlblDanmakuController(
     private val liveEmissionBuffer = ArrayList<DmModel>(32)
     private var liveMode: Boolean = false
     private var livePaused: Boolean = false
+    /** [estimateLiveDisplayCapacity] 的缓存：配置实例未变时直接复用上次结果。 */
+    private var liveCapacityConfig: DanmakuConfig? = null
+    private var liveCapacityValue: Int = 0
 
     /**
      * 引擎数据是否已被 stop 清空（切后台）。stop() 置 true；重新喂数据后置 false。
@@ -291,23 +300,39 @@ class BlblDanmakuController(
     }
 
     override fun addLiveDanmaku(dm: DmModel) {
+        addLiveDanmakus(listOf(dm))
+    }
+
+    /**
+     * 批量注入：整批只做一次"启用判断 + 密度预算"，逐条过限流后合并成一次发射调度。
+     *
+     * 直播弹幕恒立即透传，不看 mergeDuplicate 设置：合并批处理器要等满 800ms
+     * 合并窗口才放行（实测 emitted→append 稳定 ~900ms），直播弹幕比 B 站官方慢
+     * 近 1 秒。合并等待的收益（同文本 ×N）远低于即时性；视频场景的合并是离线
+     * 预知的、无此代价，不受影响。节流（100ms/30 条）与屏上密度上限仍然生效。
+     */
+    override fun addLiveDanmakus(items: List<DmModel>) {
+        if (items.isEmpty()) return
         if (!liveMode) startLive()
         if (livePaused) return
         val snapshot = lastSnapshot ?: return
         if (!snapshot.enabled) return
         val nowMs = SystemClock.uptimeMillis()
-        // 直播弹幕恒立即透传，不看 mergeDuplicate 设置：合并批处理器要等满 800ms
-        // 合并窗口才放行（实测 emitted→append 稳定 ~900ms），直播弹幕比 B 站官方慢
-        // 近 1 秒。合并等待的收益（同文本 ×N）远低于即时性；视频场景的合并是离线
-        // 预知的、无此代价，不受影响。节流（100ms/30 条）与屏上密度上限仍然生效。
-        emitLiveDanmakus(
-            liveBatcher.offer(
-                item = dm,
-                nowMs = nowMs,
-                mergeEnabled = false,
-                displayCapacity = estimateLiveDisplayCapacity(),
+        // 密度预算按 track/字号/区域算，整批共用同一结果（原先每条弹幕都要读一次
+        // DisplayMetrics 并重算一遍）。
+        val capacity = estimateLiveDisplayCapacity()
+        val accepted = ArrayList<DmModel>(items.size)
+        for (item in items) {
+            accepted.addAll(
+                liveBatcher.offer(
+                    item = item,
+                    nowMs = nowMs,
+                    mergeEnabled = false,
+                    displayCapacity = capacity,
+                )
             )
-        )
+        }
+        emitLiveDanmakus(accepted)
     }
 
     override fun applySettings(snapshot: DanmakuSettingsSnapshot) {
@@ -608,14 +633,24 @@ class BlblDanmakuController(
         )
     }
 
+    /**
+     * 直播屏上密度预算（每轨道约 2~3 条，×3 对齐轨道实际承载）。
+     * 只依赖 [currentConfig]（area / 字号 / 轨道间距），而它只在 `applySettings` 时
+     * 整体替换，因此按配置实例缓存即可——原先每条弹幕都要读一次 DisplayMetrics 并重算。
+     *
+     * 性能兜底仍在：throttle(30条/100ms)、引擎同屏自适应上限、轨道追尾判定。
+     */
     private fun estimateLiveDisplayCapacity(): Int {
-        val visibleHeight = context.resources.displayMetrics.heightPixels * currentConfig.area
-        val trackHeight = (currentConfig.textSizeSp * density * currentConfig.trackSpacing.factor)
-            .coerceAtLeast(24f)
+        val cfg = currentConfig
+        val cached = liveCapacityValue
+        if (cached > 0 && liveCapacityConfig === cfg) return cached
+        val visibleHeight = context.resources.displayMetrics.heightPixels * cfg.area
+        val trackHeight = (cfg.textSizeSp * density * cfg.trackSpacing.factor).coerceAtLeast(24f)
         val tracks = (visibleHeight / trackHeight).toInt().coerceAtLeast(3)
-        // 每轨道并发约 2~3 条（追尾判定控制），×3 对齐轨道实际承载；
-        // 性能兜底仍在：throttle(30条/100ms)、引擎同屏自适应上限、轨道追尾判定。
-        return (tracks * 3).coerceIn(6, 160)
+        val capacity = (tracks * 3).coerceIn(6, 160)
+        liveCapacityConfig = cfg
+        liveCapacityValue = capacity
+        return capacity
     }
 
     private fun resetLiveState() {
@@ -866,7 +901,7 @@ class BlblDanmakuController(
             fontWeight = DanmakuFontWeight.Bold,
             strokeWidthPx = strokeWidthPx,
             speedLevel = snapshot.speed.toBlblSpeedLevel(),
-            area = snapshot.screenArea.toBlblArea(),
+            area = danmakuAreaFraction(snapshot.screenArea),
             laneDensity = DanmakuLaneDensity.Standard,
             trackSpacing = DanmakuTrackSpacing.fromPrefValue(snapshot.trackSpacing),
         )
@@ -904,19 +939,6 @@ class BlblDanmakuController(
 
     /** speed(1-9) → blbl speedLevel(1-10)。直接对应，9 以上不动（不使用 level 10）。 */
     private fun Int.toBlblSpeedLevel(): Int = coerceIn(1, 10)
-
-    /**
-     * screenArea → blbl area(0-1)。
-     * 映射沿用已移除功能向引擎的 toDanmakuScreenPart。
-     */
-    private fun Int.toBlblArea(): Float = when (this) {
-        -1 -> 1f / 8f
-        0 -> 0.16f
-        1 -> 1f / 4f
-        3 -> 1f / 2f
-        7 -> 3f / 4f
-        else -> 1f
-    }
 }
 
 /** 归并两条弹幕时间线；existing 必须已按 progress 升序。 */

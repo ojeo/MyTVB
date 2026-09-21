@@ -367,6 +367,7 @@
     <string name="show_debug">显示视频调试信息</string>
     <string name="show_dm_switch">显示弹幕开关按钮</string>
     <string name="dm_render_engine">弹幕渲染引擎</string>
+    <string name="dm_render_quality">弹幕渲染质量</string>
     <string name="show_next_previous">显示上下集切换按钮</string>
     <string name="show_subtitle_default">默认启用字幕</string>
     <string name="side_sheet_accessibility_pane_title">Side Sheet</string>

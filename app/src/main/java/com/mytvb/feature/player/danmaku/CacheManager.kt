@@ -91,6 +91,31 @@ internal class CacheManager(
 
     private val handler: Handler = CacheHandler(thread.looper)
 
+    /**
+     * 建图线程是否处于"退让"档（BACKGROUND）。
+     *
+     * 默认档是 DEFAULT 而不是 BACKGROUND：TV big.LITTLE 上 BACKGROUND 会把线程压到小核
+     * 并降 cgroup 权重，视频解码繁忙时建图饥饿 → 缓存超时丢弃（"半路消失"）。
+     * 但反过来，当视频帧率**已经**被弹幕拖累时，让建图主动退让、优先保播放才是对的取舍，
+     * 因此由保播放降载在重档位（REDUCED/SUSPENDED）时切到 BACKGROUND，恢复后切回。
+     */
+    @Volatile
+    private var lowPriority = false
+
+    fun setLowPriority(low: Boolean) {
+        if (low == lowPriority) return
+        lowPriority = low
+        runCatching {
+            Process.setThreadPriority(
+                thread.threadId,
+                if (low) Process.THREAD_PRIORITY_BACKGROUND else Process.THREAD_PRIORITY_DEFAULT,
+            )
+        }
+        if (AppLog.isEnabled) {
+            AppLog.i(TAG, "cache thread priority -> ${if (low) "BACKGROUND" else "DEFAULT"}")
+        }
+    }
+
     private val bitmapBudget = BitmapMemoryBudget(
         resolveDanmakuBitmapBudgetBytes(
             screenWidth = appContext.resources.displayMetrics.widthPixels,

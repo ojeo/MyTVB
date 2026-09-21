@@ -16,7 +16,9 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -28,6 +30,12 @@ class LivePlayerViewModel(
     companion object {
         private const val TAG = "LivePlayerViewModel"
         private const val HEARTBEAT_INTERVAL_MS = 60_000L
+
+        /** 直播弹幕聚合窗口：主线程批次频率与"每条弹幕额外延迟"的折中。 */
+        private const val LIVE_DANMAKU_BATCH_WINDOW_MS = 16L
+
+        /** 单批上限：防止极端洪峰下一次性构造过大列表（超出部分留给下一批）。 */
+        private const val LIVE_DANMAKU_BATCH_MAX = 64
     }
 
     private val _playUrl = MutableStateFlow<String?>(null)
@@ -63,8 +71,39 @@ class LivePlayerViewModel(
     val refreshEvent = _refreshEvent.receiveAsFlow()
 
     // 弹幕
-    val liveDanmaku: SharedFlow<DmModel> = danmakuManager.danmakuFlow
+    private val _liveDanmakuBatches = MutableSharedFlow<List<DmModel>>(extraBufferCapacity = 8)
+    val liveDanmakuBatches: SharedFlow<List<DmModel>> = _liveDanmakuBatches.asSharedFlow()
     val danmakuConnected: StateFlow<Boolean> = danmakuManager.isConnected
+
+    /**
+     * 直播弹幕聚合：把逐条到达的弹幕按 ~16ms 窗口攒成批，再整批交给播放器视图。
+     *
+     * 为什么值得聚合：WS 收包线程逐条 `tryEmit`，热门房间上限约 300 条/秒；逐条跨线程
+     * 投递到主线程、逐条走一遍"启用判断 + 限流 + 密度预算 + 发射调度"，等于把大量细碎
+     * 调度压在主线程上。聚合后主线程的批次数降到约 60 次/秒量级。
+     *
+     * 代价：每条弹幕多 ~16ms 延迟。引擎侧自身的发射批处理窗口是 50ms（LIVE_EMIT_BATCH_MS），
+     * 且节流上限是 100ms/30 条，因此这点增量在量级上可忽略。
+     *
+     * 无元素丢失：用 UNLIMITED 通道做中转、`receive()` 阻塞取首条，
+     * 不使用带超时的 `receive()`（超时取消可能吞掉已投递的元素）。
+     */
+    init {
+        viewModelScope.launch {
+            val inbox = Channel<DmModel>(Channel.UNLIMITED)
+            launch { danmakuManager.danmakuFlow.collect { inbox.trySend(it) } }
+            val batch = ArrayList<DmModel>(LIVE_DANMAKU_BATCH_MAX)
+            while (isActive) {
+                batch.clear()
+                batch.add(inbox.receive())
+                delay(LIVE_DANMAKU_BATCH_WINDOW_MS)
+                while (batch.size < LIVE_DANMAKU_BATCH_MAX) {
+                    batch.add(inbox.tryReceive().getOrNull() ?: break)
+                }
+                _liveDanmakuBatches.tryEmit(batch.toList())
+            }
+        }
+    }
 
     private var currentRoomId: Long = 0
     private var heartbeatJob: Job? = null

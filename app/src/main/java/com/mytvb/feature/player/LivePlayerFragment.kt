@@ -356,11 +356,11 @@ class LivePlayerFragment : Fragment() {
             }
         }
 
-        // 实时弹幕：用引擎当前时间作为 position 注入
+        // 实时弹幕：按 ~16ms 窗口聚合后整批注入（位置由引擎用自身时钟注入）
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                viewModel.liveDanmaku.collect { dmModel ->
-                    binding.playerView.addLiveDanmaku(dmModel)
+                viewModel.liveDanmakuBatches.collect { batch ->
+                    binding.playerView.addLiveDanmakus(batch)
                 }
             }
         }

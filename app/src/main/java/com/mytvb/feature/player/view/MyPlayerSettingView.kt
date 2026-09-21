@@ -65,6 +65,12 @@ class MyPlayerSettingView @JvmOverloads constructor(
          */
         internal const val KEY_DM_RENDER_ENGINE = "dm_render_engine"
 
+        /**
+         * 弹幕渲染质量（与 SettingsFragment.KEY_DM_RENDER_QUALITY 同名同值）。
+         * 与引擎同样只在「设置-弹幕」中可调，由 MyPlayerSettingPreferenceStore 直接读取。
+         */
+        internal const val KEY_DM_RENDER_QUALITY = "dm_render_quality"
+
         private const val LEVEL_MAIN = 1
         private const val LEVEL_SUB = 2
         private const val LEVEL_DM = 3

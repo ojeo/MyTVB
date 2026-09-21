@@ -66,6 +66,7 @@ import com.mytvb.feature.player.danmaku.render.LiteDanmakuRenderHost
 import com.mytvb.feature.player.danmaku.common.DanmakuSettingsSnapshot
 import com.mytvb.feature.player.danmaku.common.DanmakuController
 import com.mytvb.feature.player.danmaku.common.LiveDanmakuController
+import com.mytvb.feature.player.danmaku.common.danmakuAreaFraction
 import com.mytvb.feature.player.DanmakuFilterContext
 import com.mytvb.feature.player.sponsor.SponsorSegment
 import kotlinx.coroutines.CoroutineScope
@@ -114,6 +115,14 @@ class MyPlayerView @JvmOverloads constructor(
         private const val REBUFFER_BUFFERING_INDICATOR_DELAY_MS = 150L
         private const val VIDEO_FPS_WINDOW_MS = 500L
         private const val DM_MASK_STARTUP_LOAD_DELAY_MS = 1500L
+
+        /**
+         * 直播 band 模式开关（逃生阀）。
+         *
+         * 开启时直播的弹幕层只覆盖"弹幕区域"而非全屏，省掉全屏透明 Surface 的逐帧混合；
+         * 若目标设备出现弹幕区域错位/缓冲异常，置 false 即恢复原全屏行为（只是失去该收益）。
+         */
+        private const val LIVE_DANMAKU_BAND_ENABLED = true
         private const val SHUTTER_FADE_DURATION_MS = 180L
         private const val SHUTTER_TIMEOUT_MS = 8_000L
         private const val MASK_GEOMETRY_LOG_INTERVAL_MS = 2_000L
@@ -2913,7 +2922,8 @@ class MyPlayerView @JvmOverloads constructor(
      */
     fun setupDanmakuEngine() {
         if (liteDanmakuController != null) return
-        val engine = MyPlayerSettingPreferenceStore(context).getRenderEngine()
+        val store = MyPlayerSettingPreferenceStore(context)
+        val engine = store.getRenderEngine()
         AppLog.i("DmEngine", "setupDanmakuEngine engine=${engine.prefValue}")
         val view: DanmakuRenderHost = when (engine) {
             DanmakuRenderEngine.LITE -> LiteDanmakuRenderHost(DanmakuView(context))
@@ -2925,6 +2935,8 @@ class MyPlayerView @JvmOverloads constructor(
                 glView.maskHostProvider = { dmkMaskHost }
                 // Debug Overlay 的视频 FPS：来自播放器 VideoFrameMetadataListener 统计。
                 glView.videoFpsProvider = { videoFps }
+                // 用户「弹幕渲染质量」：必须在首轮 measure / buffer 分配前落地（与 area 同一约束）。
+                glView.setRenderQualityScale(store.getRenderQuality().scaleFactor)
             }
         }
         val renderView = view.renderView
@@ -2971,6 +2983,8 @@ class MyPlayerView @JvmOverloads constructor(
         lastDanmakuData = data
         lastDanmakuFilterContext = filterContext
         liveDanmakuClockBaseMs = 0L
+        // 回到点播：恢复全屏弹幕层（band 模式只用于直播，见 applyLiveDanmakuBand）。
+        liteDanmakuView?.setLiveBandFraction(1f)
         syncDanmakuSettings()
         setupDanmakuEngine()
         syncDanmakuSettings()
@@ -2987,13 +3001,36 @@ class MyPlayerView @JvmOverloads constructor(
     fun startLiveDanmaku() {
         setupDanmakuEngine()
         syncDanmakuSettings()
+        // band 模式必须在首次 measure / Surface buffer 分配前落地，故紧跟引擎创建。
+        applyLiveDanmakuBand()
         // 每次进入直播都重锚独立时钟（含切房间），配合 startLive 清空时间线。
         liveDanmakuClockBaseMs = SystemClock.elapsedRealtime()
         activeLiveDanmakuController()?.startLive()
     }
 
+    /**
+     * 直播 band 模式：把弹幕层收缩到"弹幕区域"高度，消除全屏透明 Surface 的逐帧混合
+     * （详见 GlDanmakuView.liveBandFraction）。
+     *
+     * 占比直接取设置快照，保证与下发给引擎的 area 同源；幂等，可随"弹幕区域"变化重复调用。
+     */
+    private fun applyLiveDanmakuBand() {
+        if (!LIVE_DANMAKU_BAND_ENABLED) return
+        val fraction = danmakuAreaFraction(buildDanmakuSettingsSnapshot().screenArea)
+        liteDanmakuView?.setLiveBandFraction(fraction)
+    }
+
     fun addLiveDanmaku(dm: DmModel) {
         activeLiveDanmakuController()?.addLiveDanmaku(dm)
+    }
+
+    /**
+     * 批量注入直播弹幕（洪峰路径）。调用方按 ~16ms 窗口聚合后整批下发，
+     * 控制器整批只做一次限流/密度预算，避免逐条在主线程上重复这笔开销。
+     */
+    fun addLiveDanmakus(items: List<DmModel>) {
+        if (items.isEmpty()) return
+        activeLiveDanmakuController()?.addLiveDanmakus(items)
     }
 
     fun setDanmakuEnabled(enabled: Boolean) {
@@ -3177,6 +3214,8 @@ class MyPlayerView @JvmOverloads constructor(
         dmMaskController.setDanmakuVisible(snapshot.enabled)
         updateVideoFrameRateStrategy(snapshot.enabled)
         activeDanmakuController()?.applySettings(snapshot)
+        // 直播中用户改"弹幕区域"：band 高度要跟着走（band 仅用于直播，点播不走这条）。
+        if (liveDanmakuClockBaseMs > 0L) applyLiveDanmakuBand()
     }
 
     private fun updateVideoFrameRateStrategy(danmakuEnabled: Boolean) {

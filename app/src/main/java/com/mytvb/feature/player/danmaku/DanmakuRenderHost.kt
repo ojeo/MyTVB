@@ -26,6 +26,22 @@ interface DanmakuRenderHost {
         // 默认 no-op（LEGACY）；GlDanmakuView 覆盖以支持 CONTINUOUS。
     }
 
+    /**
+     * 保播放降载：临时缩放引擎同屏上限（1.0 = 不降载）。
+     * 由宿主在检测到视频帧率被弹幕拖累时下调，恢复后还原。
+     */
+    fun setLoadSheddingScale(scale: Float) {
+        // 默认 no-op；GPU 后端覆盖并透传给引擎。
+    }
+
+    /**
+     * 直播 band 模式：弹幕层只覆盖屏幕上方的弹幕区域（占屏高 fraction），
+     * 而不是全屏透明 Surface；fraction ≥ 1 表示恢复全屏。
+     */
+    fun setLiveBandFraction(fraction: Float) {
+        // 默认 no-op；GPU 后端覆盖。
+    }
+
     /** 当前生效的时钟模式。控制器据此决定是否退役自身漂移监督器。 */
     fun currentDanmakuClockMode(): DanmakuClockMode = DanmakuClockMode.LEGACY
 
