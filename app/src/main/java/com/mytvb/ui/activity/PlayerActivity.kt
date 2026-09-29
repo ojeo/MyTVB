@@ -229,7 +229,10 @@ class PlayerActivity : BaseActivity<FragmentVideoPlayerBinding>() {
 
     private val appEventHub: AppEventHub by inject()
     private val videoRepository: com.mytvb.repository.VideoRepository by inject()
+    private val favoriteRepository: com.mytvb.repository.FavoriteRepository by inject()
+    private val sessionGateway: com.mytvb.network.session.NetworkSessionGateway by inject()
     private val douyinModeManager: DouyinModeManager by inject()
+    private val keyBindingStore: com.mytvb.feature.keybinding.KeyBindingStore by inject()
 
     override fun getViewBinding(): FragmentVideoPlayerBinding {
         val startMs = SystemClock.elapsedRealtime()
@@ -272,6 +275,8 @@ class PlayerActivity : BaseActivity<FragmentVideoPlayerBinding>() {
     private lateinit var autoPlayController: VideoPlayerAutoPlayController
     private lateinit var overlayUiController: VideoPlayerOverlayController
     private lateinit var resumeHintController: VideoPlayerResumeHintController
+    private lateinit var quickActionExecutor: com.mytvb.feature.player.interaction.PlayerQuickActionExecutor
+    private var playerKeyBindingHandler: com.mytvb.feature.keybinding.PlayerKeyBindingHandler? = null
 
     private var latestErrorMessage: String? = null
     private var latestLoadingState: Boolean = false
@@ -1063,28 +1068,122 @@ class PlayerActivity : BaseActivity<FragmentVideoPlayerBinding>() {
             override fun onUpInfo() { showOwnerDetailDialog() }
             override fun onMore() { showPlayerActionDialog() }
             override fun onVideoInfo() { showVideoInfoDialog() }
-            override fun onSubtitle() {
-                if (viewModel.subtitles.value.isNotEmpty()) {
-                    playerView.showSubtitleSettingView()
-                }
-            }
-            override fun onRepeat() {
-                val currentPlayer = player ?: return
-                currentPlayer.repeatMode = if (currentPlayer.repeatMode == Player.REPEAT_MODE_ONE) {
-                    Player.REPEAT_MODE_OFF
-                } else {
-                    Player.REPEAT_MODE_ONE
-                }
-                playerView.setRepeatMode(currentPlayer.repeatMode)
-                Toast.makeText(applicationContext, if (currentPlayer.repeatMode == Player.REPEAT_MODE_ONE) R.string.activity_repeat_one else R.string.activity_repeat_all, Toast.LENGTH_SHORT).show()
-            }
+            override fun onSubtitle() = showSubtitleSettings()
+            override fun onRepeat() = toggleRepeatMode()
             override fun onDmEnableChange(enabled: Boolean) { playerView.setDanmakuEnabled(enabled) }
             override fun onPlaybackSpeedClick() { playerView.showPlaybackSpeedSettingView() }
         })
         playerView.onUserSeekListener = { positionMs ->
             viewModel.sponsorUserSeek(positionMs)
         }
+        setupKeyBinding()
         renderControllerChrome(View.GONE)
+    }
+
+    /** 上一条快捷键提示，用于在下一条显示前取消掉。 */
+    private var keyBindingToast: Toast? = null
+
+    /**
+     * 显示快捷键提示。
+     *
+     * 每次都新建实例，但先 `cancel()` 掉上一条，两个坑一起避开：
+     * 1. 不 cancel 时 Toast 是队列式的，连按会排长队，提示严重滞后于实际操作；
+     * 2. 复用同一实例改文本，系统会因 "view 未变化" 跳过 addView，表现为提示消失后再按无提示。
+     */
+    private fun showKeyBindingToast(message: String) {
+        keyBindingToast?.cancel()
+        Toast.makeText(this, message, Toast.LENGTH_SHORT)
+            .also { keyBindingToast = it }
+            .show()
+    }
+
+    /** 打开字幕选择面板；无字幕时提示（播控面板按钮与快捷键共用）。 */
+    private fun showSubtitleSettings() {
+        if (viewModel.subtitles.value.isEmpty()) {
+            showKeyBindingToast(getString(R.string.subtitle_unavailable))
+            return
+        }
+        playerView.showSubtitleSettingView()
+    }
+
+    /** 在单集循环 / 顺序播放之间切换（播控面板按钮与快捷键共用）。 */
+    private fun toggleRepeatMode() {
+        val currentPlayer = player ?: return
+        currentPlayer.repeatMode = if (currentPlayer.repeatMode == Player.REPEAT_MODE_ONE) {
+            Player.REPEAT_MODE_OFF
+        } else {
+            Player.REPEAT_MODE_ONE
+        }
+        playerView.setRepeatMode(currentPlayer.repeatMode)
+        showKeyBindingToast(
+            if (currentPlayer.repeatMode == Player.REPEAT_MODE_ONE) {
+                getString(R.string.activity_repeat_one)
+            } else {
+                getString(R.string.activity_repeat_all)
+            }
+        )
+    }
+
+    /** 场景 A（视频播放中）的遥控器快捷键。 */
+    private fun setupKeyBinding() {
+        quickActionExecutor = com.mytvb.feature.player.interaction.PlayerQuickActionExecutor(
+            context = this,
+            videoRepository = videoRepository,
+            favoriteRepository = favoriteRepository,
+            sessionGateway = sessionGateway
+        )
+        playerKeyBindingHandler = com.mytvb.feature.keybinding.PlayerKeyBindingHandler(
+            store = keyBindingStore,
+            playerView = playerView,
+            actions = object : com.mytvb.feature.keybinding.PlayerKeyBindingHandler.Actions {
+                override fun toggleFavorite() {
+                    val view = latestVideoInfo?.view
+                    quickActionExecutor.toggleFavorite(
+                        aid = view?.aid ?: 0L,
+                        bvid = view?.bvid.orEmpty(),
+                        ownerMid = view?.owner?.mid ?: 0L
+                    )
+                }
+
+                override fun toggleWatchLater() {
+                    val view = latestVideoInfo?.view
+                    quickActionExecutor.toggleWatchLater(
+                        aid = view?.aid ?: 0L,
+                        bvid = view?.bvid.orEmpty()
+                    )
+                }
+
+                override fun showOwnerDetail() = showOwnerDetailDialog()
+
+                override fun playPreviousEpisode() {
+                    if (!viewModel.hasPreviousEpisode()) {
+                        showKeyBindingToast(getString(R.string.episode_no_previous))
+                        return
+                    }
+                    viewModel.playPrevious()
+                }
+
+                override fun playNextEpisode() {
+                    if (!viewModel.hasNextEpisode()) {
+                        showKeyBindingToast(getString(R.string.episode_no_next))
+                        return
+                    }
+                    viewModel.playNext()
+                }
+
+                override fun showChooseEpisode() = showChooseEpisodeDialog()
+
+                override fun showRelated() = showRelatedPanel()
+
+                override fun showVideoInfo() = showVideoInfoDialog()
+
+                override fun showSubtitle() = showSubtitleSettings()
+
+                override fun toggleRepeatMode() = this@PlayerActivity.toggleRepeatMode()
+
+                override fun toast(message: String) = showKeyBindingToast(message)
+            }
+        )
     }
 
     private fun enableVideoTrack(targetPlayer: ExoPlayer) {
@@ -1134,6 +1233,12 @@ class PlayerActivity : BaseActivity<FragmentVideoPlayerBinding>() {
             ) {
                 return super.dispatchKeyEvent(event)
             }
+            return true
+        }
+        // 遥控器快捷键（场景 A）：命中即消费，不再下发给播放器
+        if (event.action == KeyEvent.ACTION_DOWN &&
+            playerKeyBindingHandler?.handle(event.keyCode) == true
+        ) {
             return true
         }
         return super.dispatchKeyEvent(event)
@@ -1606,6 +1711,12 @@ class PlayerActivity : BaseActivity<FragmentVideoPlayerBinding>() {
         stopProgressUpdates()
         stopTeenModeTicker()
         resumeHintController.release()
+        if (::quickActionExecutor.isInitialized) {
+            quickActionExecutor.release()
+        }
+        playerKeyBindingHandler = null
+        keyBindingToast?.cancel()
+        keyBindingToast = null
         player?.removeListener(playerListener)
         playerView.destroy()
         playerView.stopDanmaku()

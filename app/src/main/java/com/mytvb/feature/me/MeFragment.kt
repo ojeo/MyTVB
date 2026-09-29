@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -48,6 +49,9 @@ class MeFragment : BaseFragment<FragmentMeBinding>(), MainTabFocusTarget {
     private var tabSelectedListener: TabLayout.OnTabSelectedListener? = null
     private var pendingRefreshAfterLogin = false
     private var wasLoggedInOnPause = false
+    /** 视图尚未创建时暂存的待切换子页，见 [selectPage]。 */
+    private var pendingPage: Int? = null
+    private var viewReady = false
 
     override fun getViewBinding(
         inflater: LayoutInflater,
@@ -101,7 +105,42 @@ class MeFragment : BaseFragment<FragmentMeBinding>(), MainTabFocusTarget {
         }.also { viewPager.registerOnPageChangeCallback(it) }
 
         viewPager.currentItem = getDefaultTabIndex()
-        viewPager.post { notifyCurrentTab { it.onTabSelected() } }
+        viewReady = true
+        pendingPage?.let { page ->
+            pendingPage = null
+            if (viewPager.currentItem != page) {
+                viewPager.currentItem = page
+            }
+        }
+        notifyCurrentTabWithRetry({ it.onTabSelected() })
+    }
+
+    /**
+     * 切换到指定子页（0 历史 / 1 收藏 / 2 稍后再看）。
+     *
+     * 供遥控器快捷键调用：视图尚未创建时先记录，等 [initView] 建好 ViewPager 再落地。
+     */
+    fun selectPage(position: Int) {
+        if (!viewReady) {
+            pendingPage = position
+            return
+        }
+        pendingPage = null
+        if (viewPager.currentItem != position) {
+            viewPager.currentItem = position
+        }
+    }
+
+    /**
+     * 判断 [fragment] 是否为当前子页的实例（供子页在 initData 时决定是否立即加载）。
+     *
+     * 快捷键在首次创建本页时切到非默认子页，ViewPager 首次布局可能把目标页 Fragment
+     * 先建一次又重建，重建后的实例收不到 onTabSelected。子页 initData 用引用相等判断
+     * "我是不是当前页"，是就直接加载，不依赖通知时序。
+     */
+    fun isCurrentPage(fragment: Fragment): Boolean {
+        if (!viewReady) return false
+        return adapter.getFragment(viewPager.currentItem) === fragment
     }
 
     override fun onPause() {
@@ -245,16 +284,19 @@ class MeFragment : BaseFragment<FragmentMeBinding>(), MainTabFocusTarget {
         return adapter.getFragment(viewPager.currentItem) as? MeTabPage
     }
 
-    private fun notifyCurrentTab(action: (MeTabPage) -> Unit) {
-        getCurrentTabPage()?.let(action)
-    }
-
-    private fun notifyCurrentTabWithRetry(action: (MeTabPage) -> Unit, retries: Int = 5) {
+    /**
+     * 通知当前子页执行 [MeTabPage.onTabSelected]，重试直到子页 view 就绪。
+     *
+     * 初版只重试"子页 Fragment 为 null"且用立即 post：快捷键首次创建本页（懒创建）时，
+     * 5 次立即重试全在 ViewPager 首次布局之前耗尽，子页创建后 onTabSelected 永远等不到，
+     * 表现为"跳到稍后再看但列表空白"。改为同时等待 view 就绪 + postDelayed 跨帧重试。
+     */
+    private fun notifyCurrentTabWithRetry(action: (MeTabPage) -> Unit, retries: Int = 10) {
         val page = getCurrentTabPage()
-        if (page != null) {
+        if (page != null && (page as? Fragment)?.view != null) {
             action(page)
         } else if (retries > 0) {
-            viewPager.post { notifyCurrentTabWithRetry(action, retries - 1) }
+            viewPager.postDelayed({ notifyCurrentTabWithRetry(action, retries - 1) }, 50L)
         }
     }
 
@@ -291,6 +333,7 @@ class MeFragment : BaseFragment<FragmentMeBinding>(), MainTabFocusTarget {
     }
 
     override fun onDestroyView() {
+        viewReady = false
         pageChangeCallback?.let(viewPager::unregisterOnPageChangeCallback)
         pageChangeCallback = null
         tabSelectedListener?.let { tabLayout.removeOnTabSelectedListener(it) }

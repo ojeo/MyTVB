@@ -144,6 +144,7 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
         private const val COMMON_POSITION_RISK_CONTROL = 7
         private const val COMMON_POSITION_UI_TEXT_SIZE = 12
         private const val COMMON_POSITION_CARD_SIZE = 13
+        private const val COMMON_POSITION_KEY_BINDING = 14
         private val DM_SMART_FILTER_OPTIONS = arrayOf("关", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10")
 
         /**
@@ -245,7 +246,8 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
             storedSetting(getString(R.string.ipv4_only), "开"),
             storedSetting(getString(R.string.douyin_mode), "关"),
             storedSetting(getString(R.string.ui_text_size), "标准"),
-            storedSetting(getString(R.string.ui_card_size), "标准")
+            storedSetting(getString(R.string.ui_card_size), "标准"),
+            SettingModel(getString(R.string.key_binding_settings), "")
         )
 
         // 青少年模式分类：青少年保护开关 + 单次观看时长 + 休息时长 + 公益广告开关 + 公益广告间隔
@@ -577,6 +579,13 @@ class SettingsFragment : BaseFragment<FragmentSettingsBinding>() {
             11 -> toggleSetting(commonSettings, 11, KEY_DOUYIN_MODE)
             COMMON_POSITION_UI_TEXT_SIZE -> showUiTextScaleDialog()
             COMMON_POSITION_CARD_SIZE -> showCardSizeChoiceDialog()
+            COMMON_POSITION_KEY_BINDING -> {
+                val activity = activity as? MainActivity
+                activity?.openOverlayFragment(
+                    com.mytvb.feature.keybinding.KeyBindingFragment.newInstance(),
+                    "key_binding"
+                )
+            }
             commonSettings.lastIndex - 1 -> {
                 val newValue = if (AppLog.isEnabled) "关" else "开"
                 AppLog.setEnabled(newValue == "开")

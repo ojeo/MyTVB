@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.appcompat.widget.LinearLayoutCompat xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingStart="@dimen/px50"
+    android:paddingTop="@dimen/px30"
+    android:paddingEnd="@dimen/px50"
+    android:paddingBottom="@dimen/px14">
+
+    <androidx.appcompat.widget.AppCompatTextView
+        android:id="@+id/tv_section_title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="?android:attr/textColorPrimary"
+        android:textSize="@dimen/px32"
+        android:textStyle="bold" />
+
+    <androidx.appcompat.widget.AppCompatTextView
+        android:id="@+id/tv_section_desc"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/px6"
+        android:textColor="?android:attr/textColorSecondary"
+        android:textSize="@dimen/px26" />
+
+</androidx.appcompat.widget.LinearLayoutCompat>

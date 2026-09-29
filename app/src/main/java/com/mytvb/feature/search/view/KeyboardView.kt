@@ -178,7 +178,13 @@ class KeyboardView @JvmOverloads constructor(
         AppLog.i(TAG, "buildKeyboard elapsed=${SystemClock.elapsedRealtime() - startMs}ms")
     }
 
-    private fun ensureKeyboardBuilt() {
+    /**
+     * 确保 header/键盘/footer 已构建。
+     *
+     * 外部（如焦点桥接）需要在收集可聚焦子 View 之前调用，
+     * 否则 [keyboardContainer] 为空、拿不到任何按键。
+     */
+    fun ensureKeyboardBuilt() {
         if (!keyboardBuilt) {
             buildKeyboard()
         }
