@@ -15,6 +15,11 @@ import org.junit.Test
 
 class VideoPlayerEpisodeCatalogBuilderTest {
 
+    /**
+     * 不传 Context：纯 JVM 单测没有 Android 资源表（mockable android.jar 中
+     * `Context.getString` 只返回 null），builder 会退化到与中文资源等价的字面量，
+     * 因此下面的「共 2 P」断言仍校验的是真实展示文案。
+     */
     private val builder = VideoPlayerEpisodeCatalogBuilder(unusedApiService())
 
     @Test

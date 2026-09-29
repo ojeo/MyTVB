@@ -18,7 +18,11 @@ import com.mytvb.network.api.ApiService
 @OptIn(UnstableApi::class)
 class VideoPlayerEpisodeCatalogBuilder(
     private val apiService: ApiService,
-    private val context: Context
+    /**
+     * 仅用于取「P 数」文案（i18n 后由资源提供）。允许为 null：纯 JVM 单测没有资源表，
+     * 此时退化为与中文资源等价的字面量；生产链路（ViewModel）始终传入非空 Context。
+     */
+    private val context: Context? = null
 ) {
 
     suspend fun buildUgcEpisodes(
@@ -140,7 +144,8 @@ class VideoPlayerEpisodeCatalogBuilder(
             cid = cid,
             title = part.takeIf { it.isNotBlank() } ?: "P${page.takeIf { it > 0 } ?: index + 1}",
             panelTitle = part.takeIf { it.isNotBlank() } ?: "P${page.takeIf { it > 0 } ?: index + 1}",
-            subtitle = context.getString(R.string.player_page_p_format, page.takeIf { it > 0 } ?: index + 1),
+            subtitle = context?.getString(R.string.player_page_p_format, page.takeIf { it > 0 } ?: index + 1)
+                ?: "P${page.takeIf { it > 0 } ?: index + 1}",
             cover = view.pic,
             aid = view.aid,
             bvid = view.bvid,
@@ -260,7 +265,8 @@ class VideoPlayerEpisodeCatalogBuilder(
                 cid = page.cid.takeIf { it > 0L } ?: archiveCid,
                 title = displayTitle,
                 panelTitle = displayTitle,
-                subtitle = context.getString(R.string.player_total_p_format, candidatePages.size),
+                subtitle = context?.getString(R.string.player_total_p_format, candidatePages.size)
+                    ?: "共 ${candidatePages.size} P",
                 cover = archiveCover,
                 aid = archiveAid,
                 bvid = archiveBvid,
