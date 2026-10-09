@@ -161,6 +161,80 @@ object BiliApi {
         }
     }
 
+    /**
+     * 视频评论根列表（网页版同款 x/v2/reply/wbi/main，WBI 签名 + 游标分页）。
+     * 首页传空游标，翻页传上一页返回的 cursor.pagination_reply.next_offset。
+     * mode：3=热门（默认）、2=最新（时间）。
+     */
+    suspend fun commentMainPage(
+        oid: Long,
+        type: Int,
+        mode: Int,
+        cursorOffset: String,
+    ): JSONObject {
+        val paginationStr = JSONObject().put("offset", cursorOffset).toString()
+        val url = BiliClient.signedWbiUrl(
+            path = "x/v2/reply/wbi/main",
+            params = mapOf(
+                "oid" to oid.coerceAtLeast(1).toString(),
+                "type" to type.coerceAtLeast(1).toString(),
+                "mode" to mode.toString(),
+                "pagination_str" to paginationStr,
+                "plat" to "1",
+                "web_location" to "1315875",
+            )
+        )
+        val json = BiliClient.getJson(url, mapOf("Referer" to "https://www.bilibili.com/"))
+        BiliClient.checkResponse(json, "commentMainPage")
+        return json.optJSONObject("data") ?: JSONObject()
+    }
+
+    /** 用户空间信息（x/space/wbi/acc/info，WBI 签名）——用户标识补齐（大会员/头像框/等级）。 */
+    suspend fun spaceAccInfo(mid: Long): com.mytvb.core.ui.user.UserBadges? {
+        val url = BiliClient.signedWbiUrl(
+            path = "x/space/wbi/acc/info",
+            params = mapOf("mid" to mid.toString())
+        )
+        val json = BiliClient.getJson(url, mapOf("Referer" to "https://space.bilibili.com/"))
+        BiliClient.checkResponse(json, "spaceAccInfo")
+        val data = json.optJSONObject("data") ?: return null
+        val vip = data.optJSONObject("vip")
+        return com.mytvb.core.ui.user.UserBadges(
+            mid = data.optLong("mid", mid),
+            name = data.optString("name", ""),
+            avatar = data.optString("face", "").trim().takeIf { it.isNotBlank() },
+            level = data.optInt("level", 0).takeIf { it > 0 },
+            isVip = vip != null && vip.optInt("status", 0) == 1 && vip.optInt("type", 0) > 0,
+            pendantUrl = data.optJSONObject("pendant")
+                ?.optString("image_enhance", "")
+                ?.trim()
+                ?.takeIf { it.startsWith("http") },
+        )
+    }
+
+    /** 评论楼中楼回复列表（x/v2/reply/reply，pn/ps 分页，无需 WBI 签名）。 */
+    suspend fun commentRepliesPage(
+        type: Int,
+        oid: Long,
+        rootRpid: Long,
+        pn: Int = 1,
+        ps: Int = 20
+    ): JSONObject {
+        val url = BiliClient.buildUrl(
+            path = "x/v2/reply/reply",
+            params = mapOf(
+                "type" to type.coerceAtLeast(1).toString(),
+                "oid" to oid.coerceAtLeast(1).toString(),
+                "root" to rootRpid.coerceAtLeast(1).toString(),
+                "pn" to pn.coerceAtLeast(1).toString(),
+                "ps" to ps.coerceIn(1, 49).toString()
+            )
+        )
+        val json = BiliClient.getJson(url, mapOf("Referer" to "https://www.bilibili.com/"))
+        BiliClient.checkResponse(json, "commentRepliesPage")
+        return json.optJSONObject("data") ?: JSONObject()
+    }
+
     suspend fun liveHomeList(): LiveListWrapper {
         val t0 = SystemClock.elapsedRealtime()
         val url = BiliClient.buildUrl(
@@ -175,5 +249,34 @@ object BiliApi {
         val t2 = SystemClock.elapsedRealtime()
         AppLog.i(TAG, "liveHomeList net=${t1 - t0}ms parse=${t2 - t1}ms total=${t2 - t0}ms")
         return result
+    }
+
+    /**
+     * 查询当前登录用户对目标用户的关注关系（x/relation，需登录 cookie）。
+     *
+     * 返回 attribute：0=未关注、1=悄悄关注、2=已关注、6=互相关注；
+     * 未登录（-101）或网络失败返回 null，由调用方决定缓存策略。
+     */
+    suspend fun relationAttribute(fid: Long): Int? {
+        if (fid <= 0L) return null
+        val url = BiliClient.buildUrl(
+            path = "x/relation",
+            params = mapOf("fid" to fid.toString())
+        )
+        return try {
+            val json = BiliClient.getJson(url, mapOf("Referer" to "https://www.bilibili.com/"))
+            val code = json.optInt("code", -1)
+            if (code != 0) {
+                AppLog.i(TAG, "relationAttribute fid=$fid code=$code msg=${json.optString("message", "")}")
+                null
+            } else {
+                val attribute = json.optJSONObject("data")?.optInt("attribute", 0)
+                AppLog.i(TAG, "relationAttribute fid=$fid ok attribute=$attribute raw=${json.toString().take(160)}")
+                attribute
+            }
+        } catch (e: Exception) {
+            AppLog.w(TAG, "relationAttribute fid=$fid failed: ${e.message}")
+            null
+        }
     }
 }

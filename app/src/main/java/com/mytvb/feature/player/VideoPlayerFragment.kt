@@ -14,7 +14,6 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import com.mytvb.feature.player.sponsor.SponsorProgressMarkerView
-import android.widget.TextClock
 import android.widget.TextView
 import android.widget.Toast
 import com.mytvb.core.common.ext.toast
@@ -137,9 +136,7 @@ class VideoPlayerFragment : Fragment() {
 
     private lateinit var playerView: MyPlayerView
     private lateinit var bottomProgressBar: SponsorProgressMarkerView
-    private lateinit var textClock: TextClock
     private lateinit var textSubtitle: TextView
-    private lateinit var textDebug: TextView
     private lateinit var viewNext: View
     private lateinit var viewRelated: View
     private lateinit var recyclerViewRelated: RecyclerView
@@ -155,8 +152,6 @@ class VideoPlayerFragment : Fragment() {
     private lateinit var overlayUiController: VideoPlayerOverlayController
     private lateinit var resumeHintController: VideoPlayerResumeHintController
 
-    private var latestErrorMessage: String? = null
-    private var latestLoadingState: Boolean = false
     private var latestVideoInfo: VideoDetailModel? = null
     private lateinit var playerSettings: PlayerSettings
     private var latestControllerVisibility: Int = View.GONE
@@ -205,7 +200,6 @@ class VideoPlayerFragment : Fragment() {
         onPlaybackPositionChanged = { positionMs ->
             playerView.syncDanmakuPosition(positionMs)
             interactionView.onPositionUpdate(positionMs)
-            renderDebugState()
         },
         onPlaybackStalled = { positionMs, stalledMs ->
             recoverFromPlaybackStall(positionMs, stalledMs)
@@ -373,6 +367,10 @@ class VideoPlayerFragment : Fragment() {
                 Player.STATE_ENDED -> {
                     viewModel.setLoading(false)
                     playerView.stopDanmaku()
+                    // 播完瞬间强制补发收尾心跳+直写历史（对齐 blbl）：
+                    // 心跳循环随 isPlaying=false 已停，不补发的话最后一条停在结束前。
+                    progressCoordinator.syncNow()
+                    viewModel.reportPlaybackHeartbeat(force = true)
                     handlePlaybackEnded()
                 }
                 Player.STATE_IDLE -> {
@@ -484,11 +482,9 @@ class VideoPlayerFragment : Fragment() {
         }
         bottomProgressBar = binding.bottomProgressBar
         slimTimelineRenderer = SlimTimelineRenderer(bottomProgressBar)
-        textClock = binding.textClock
         textSubtitle = binding.textSubtitle
         // 字幕有独立字号设置，不与 UI 文字缩放叠加
         ScaledTextView.exempt(textSubtitle)
-        textDebug = binding.textDebug
         viewNext = binding.viewNext
         viewRelated = binding.viewRelated
         recyclerViewRelated = binding.recyclerViewRelated
@@ -725,6 +721,7 @@ class VideoPlayerFragment : Fragment() {
         playerView.showHideActionButton(false)
         playerView.showHideEpisodeButton(false)
         playerView.showHideRelatedButton(false)
+        playerView.showHideCommentButton(false)
         playerView.showHideDmSwitchButton(false)
         playerView.showHideLiveSettingButton(false)
         playerView.showHideSubtitleButton(false)
@@ -812,6 +809,10 @@ class VideoPlayerFragment : Fragment() {
 
             override fun onMore() {
                 showPlayerActionDialog()
+            }
+
+            override fun onComments() {
+                showCommentPanel()
             }
 
             override fun onVideoInfo() {
@@ -1027,7 +1028,7 @@ class VideoPlayerFragment : Fragment() {
                     viewModel.videoInfo.collect { info ->
                         latestVideoInfo = info
                         sessionCoordinator.updateVideoInfo(info)
-                        resetDouyinModeIfNeeded()
+                                resetDouyinModeIfNeeded()
                         ensureDouyinQueueStarted()
                         schedulePreloadAndHeaderRefresh()
                         updatePrimaryActionVisibility()
@@ -1199,21 +1200,17 @@ class VideoPlayerFragment : Fragment() {
                 }
 
                 launch {
-                    viewModel.isLoading.collect { isLoading ->
-                        latestLoadingState = isLoading
-                        renderDebugState()
+                    viewModel.isLoading.collect { _ ->
                     }
                 }
 
                 launch {
                     viewModel.error.collect { error ->
-                        latestErrorMessage = error
                         if (!error.isNullOrBlank()) {
                             AppLog.e(TAG, "viewModel error: $error")
                             playerView.forceOpenShutter()
                         }
                         playerView.setCustomErrorMessage(error)
-                        renderDebugState()
                     }
                 }
 
@@ -1321,27 +1318,6 @@ class VideoPlayerFragment : Fragment() {
         }
     }
 
-    private fun renderDebugState() {
-        val text = PlayerScreenLogic.debugOverlayText(
-            context = requireContext(),
-            showDebugInfo = ::playerSettings.isInitialized && playerSettings.showDebugInfo,
-            errorMessage = latestErrorMessage,
-            player = player,
-            loadingText = getString(R.string.loading)
-        )
-        if (text == null) {
-            textDebug.isVisible = false
-            textDebug.text = ""
-        } else {
-            textDebug.isVisible = true
-            textDebug.text = text
-        }
-    }
-
-    private fun buildDebugInfo(p: ExoPlayer): String {
-        return PlayerScreenLogic.buildDebugInfo(requireContext(), p)
-    }
-
     private fun applyPlayerSettings(settings: PlayerSettings) {
         // 音乐区 1 倍速开关打开且当前是音乐区视频时，忽略默认倍速配置
         val musicZoneNormalSpeed = settings.musicZoneNormalSpeed &&
@@ -1354,7 +1330,6 @@ class VideoPlayerFragment : Fragment() {
         playerView.showHideFfRe(settings.showRewindFastForward)
         textSubtitle.setTextSize(TypedValue.COMPLEX_UNIT_PX, settings.subtitleTextSizePx.toFloat())
         playerView.setAfterPlayMode(settings.afterPlayMode)
-        renderDebugState()
         updateEpisodeNavigationVisibility()
         updateDanmakuSwitchVisibility()
         updatePlaySpeedButtonVisibility()
@@ -1382,10 +1357,6 @@ class VideoPlayerFragment : Fragment() {
             }
         }
         renderBottomProgressBar()
-        textClock.visibility = when (uiCoordinator.hudState) {
-            PlaybackUiCoordinator.HudState.Chrome -> View.VISIBLE
-            else -> View.GONE
-        }
     }
 
     private fun renderBottomProgressBar() {
@@ -1458,6 +1429,7 @@ class VideoPlayerFragment : Fragment() {
     private fun updatePrimaryActionVisibility() {
         val (hasOwner, hasVideoIdentity) = PlayerScreenLogic.primaryActionFlags(latestVideoInfo?.view)
         playerView.setShowHideOwnerInfo(hasOwner)
+        playerView.showHideCommentButton(hasVideoIdentity)
         playerView.showHideActionButton(hasVideoIdentity)
         playerView.showSettingButton(hasVideoIdentity)
     }
@@ -1578,6 +1550,10 @@ class VideoPlayerFragment : Fragment() {
         overlayUiController.showOwnerDetailDialog()
     }
 
+    private fun showCommentPanel() {
+        overlayUiController.showCommentPanel()
+    }
+
     private fun openFragmentFromPlayerHost(fragment: Fragment, tag: String) {
         val mainActivity = activity as? MainActivity
         if (mainActivity != null) {
@@ -1612,7 +1588,7 @@ class VideoPlayerFragment : Fragment() {
         progressCoordinator.syncNow()
         val (snapshotPositionMs, snapshotPlayWhenReady) = capturePlaybackSnapshot()
         postPlaybackProgressEvent(snapshotPositionMs)
-        viewModel.reportPlaybackHeartbeat()
+        viewModel.reportPlaybackHeartbeat(force = true)
         viewModel.savePlayerSnapshot()
         resumePlaybackWhenStarted = snapshotPlayWhenReady
         player?.playWhenReady = false

@@ -8,6 +8,7 @@ import android.view.Gravity
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.core.content.res.ResourcesCompat
+import com.mytvb.R
 import com.mytvb.core.ui.base.ScaledTextView
 import com.mytvb.model.interaction.InteractionEdgeQuestionChoiceModel
 import com.mytvb.model.interaction.InteractionEdgeSkinModel
@@ -40,7 +41,10 @@ class InteractionChoiceButton @JvmOverloads constructor(
         textView = ScaledTextView(context).apply {
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
-            textSize = 14f
+            setTextSize(
+                android.util.TypedValue.COMPLEX_UNIT_PX,
+                resources.getDimension(R.dimen.px32)
+            )
         }
         addView(textView, LayoutParams(
             LayoutParams.MATCH_PARENT,

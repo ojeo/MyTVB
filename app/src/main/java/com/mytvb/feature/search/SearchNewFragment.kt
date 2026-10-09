@@ -12,7 +12,7 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.TextView
 import android.widget.Toast
-import androidx.appcompat.app.AlertDialog
+import com.mytvb.core.ui.base.ChoiceDialog
 import androidx.core.os.bundleOf
 import androidx.core.view.isVisible
 import androidx.fragment.app.Fragment
@@ -385,7 +385,11 @@ class SearchNewFragment :
         val adapter = SearchResultPagerAdapter(
             onItemClick = ::onResultItemClick,
             onLoadMore = ::onResultPageLoadMore,
-            onTopEdgeUp = ::focusResultHeader
+            onTopEdgeUp = ::focusResultHeader,
+            onCachedRelation = viewModel::cachedRelation,
+            onQueryRelation = { mid ->
+                viewModel.queryRelation(mid) { resultPagerAdapter?.updateRelation(mid) }
+            }
         )
         resultPagerAdapter = adapter
         adapter.setPages(emptyList())
@@ -453,16 +457,19 @@ class SearchNewFragment :
 
     private fun showOrderDialog() {
         val orders = SearchVideoOrder.values()
-        AlertDialog.Builder(requireContext())
-            .setTitle(R.string.video_order)
-            .setItems(orders.map { getString(it.nameRes) }.toTypedArray()) { _, which ->
-                currentOrder = orders[which]
-                updateOrderText()
-                if (currentKeyword.isNotBlank()) {
-                    performSearch(currentKeyword)
-                }
+        val labels = orders.map { getString(it.nameRes) }
+        ChoiceDialog.show(
+            context = requireContext(),
+            title = getString(R.string.video_order),
+            options = labels,
+            selectedIndex = orders.indexOf(currentOrder).coerceAtLeast(0)
+        ) { which ->
+            currentOrder = orders[which]
+            updateOrderText()
+            if (currentKeyword.isNotBlank()) {
+                performSearch(currentKeyword)
             }
-            .show()
+        }
         activity?.let { ViewUtils.hideSystemBars(it) }
     }
 
@@ -695,6 +702,9 @@ class SearchNewFragment :
     override fun onResume() {
         super.onResume()
         if (isResultPanelVisible) {
+            // 从用户空间等页面返回：关注状态缓存可能已过期，失效并重查
+            viewModel.clearRelationCache()
+            resultPagerAdapter?.refreshRelations()
             AppLog.d(TAG, "onResume: isResultPanelVisible=true, posting restore")
             binding.root.postDelayed({
                 if (!isAdded || view == null) {

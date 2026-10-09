@@ -20,10 +20,10 @@
         android:textStyle="bold" />
 
     <com.mytvb.ui.widget.NonFocusableScrollView
+        android:id="@+id/text_scroll"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="@dimen/px30"
-        android:maxHeight="@dimen/px600"
         android:scrollbars="vertical">
 
         <androidx.appcompat.widget.AppCompatTextView
@@ -41,10 +41,9 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="@dimen/px35"
-        android:background="?attr/selectableItemBackground"
+        android:background="@drawable/bg_menu_button"
         android:clickable="true"
         android:focusable="true"
-        android:focusableInTouchMode="true"
         android:gravity="center"
         android:paddingStart="@dimen/px80"
         android:paddingTop="@dimen/px18"

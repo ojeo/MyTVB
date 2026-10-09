@@ -1,6 +1,7 @@
 package com.mytvb.ui.activity
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.graphics.Matrix
 import android.os.Build
@@ -13,11 +14,17 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import com.mytvb.R
 import com.mytvb.core.common.log.AppLog
+import com.mytvb.core.ui.base.UiScale
 
 class SplashActivity : Activity() {
 
     private var forwarded = false
     private val createStartMs = SystemClock.elapsedRealtime()
+
+    override fun attachBaseContext(newBase: Context) {
+        UiScale.apply(newBase.resources)
+        super.attachBaseContext(newBase)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         AppLog.i(TAG, "STARTUP SplashActivity.onCreate start")

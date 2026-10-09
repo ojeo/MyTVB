@@ -9,10 +9,10 @@
     <!-- 预览卡尺寸由 SecondsView 按屏幕宽高动态覆盖，这里只是初始兜底值 -->
     <FrameLayout
         android:id="@+id/preview_container"
-        android:layout_width="248dp"
-        android:layout_height="140dp"
+        android:layout_width="@dimen/px558"
+        android:layout_height="@dimen/px315"
         android:background="@drawable/seek_preview_card"
-        android:elevation="12dp"
+        android:elevation="@dimen/px27"
         android:visibility="gone">
 
         <FrameLayout

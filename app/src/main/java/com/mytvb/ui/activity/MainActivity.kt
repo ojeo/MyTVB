@@ -6,7 +6,7 @@ import android.view.Choreographer
 import android.view.View
 import android.view.ViewTreeObserver
 import androidx.recyclerview.widget.RecyclerView
-import android.widget.Toast
+import com.google.android.material.tabs.TabLayout
 import androidx.annotation.OptIn
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.viewModels
@@ -25,6 +25,7 @@ import com.mytvb.event.AppEventHub
 import com.mytvb.network.NetworkManager
 import com.mytvb.network.session.NetworkSessionGateway
 import com.mytvb.repository.UserRepository
+import com.mytvb.core.ui.base.AppToast
 import com.mytvb.core.ui.base.BaseActivity
 import com.mytvb.core.ui.base.OnBackPressedHandler
 import com.mytvb.model.user.UserDetailInfoModel
@@ -684,6 +685,14 @@ class MainActivity : BaseActivity<ActivityMainBinding>(),
         return binding.myTabView.focusNearestButtonTo(sourceView)
     }
 
+    /** BACK 从二级 tab 栏回退的落点：主边栏当前选中的主 tab 按钮（对齐 blbl requestFocusSidebarSelectedNav）。 */
+    fun focusSidebarCurrentTab(): Boolean {
+        if (binding.myTabView.visibility != View.VISIBLE) {
+            return false
+        }
+        return binding.myTabView.focusCurrentTab()
+    }
+
     fun showTabBar(show: Boolean) {
         binding.myTabView.visibility = if (show) View.VISIBLE else View.GONE
         binding.divide.visibility = if (show) View.VISIBLE else View.GONE
@@ -710,7 +719,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(),
         }
 
         exitTime = System.currentTimeMillis()
-        Toast.makeText(applicationContext, R.string.app_exit, Toast.LENGTH_SHORT).show()
+        AppToast.show(this, getString(R.string.app_exit))
         schedulePostBackFocusRestore()
     }
 
@@ -947,6 +956,10 @@ class MainActivity : BaseActivity<ActivityMainBinding>(),
             val focused = currentFocus
             if (focused != null && isInsideRecyclerView(focused)) {
                 mainNavigationViewModel.dispatch(MainNavigationViewModel.Event.MenuPressed)
+            } else if (focused != null && isInsideTabLayout(focused)) {
+                // 焦点停在二级 tab 栏时菜单键同样触发刷新（对齐 blbl：MENU 即刷新键，
+                // 重选 tab 后焦点在 tab 上，不能因此丢刷新入口）
+                mainNavigationViewModel.dispatch(MainNavigationViewModel.Event.MenuPressed)
             }
         }
         // 遥控器快捷键（场景 B）：仅在无浮层页面、焦点不在输入框时生效。
@@ -971,7 +984,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(),
 
     override fun toLive() {
         if (!binding.myTabView.isLiveButtonVisible()) {
-            Toast.makeText(this, R.string.live_entry_disabled, Toast.LENGTH_SHORT).show()
+            AppToast.show(this, getString(R.string.live_entry_disabled))
             return
         }
         selectMainTab(LIVE_TAB_INDEX)
@@ -991,7 +1004,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(),
 
     override fun toCategory() {
         if (!binding.myTabView.isCategoryButtonVisible()) {
-            Toast.makeText(this, R.string.category_entry_disabled, Toast.LENGTH_SHORT).show()
+            AppToast.show(this, getString(R.string.category_entry_disabled))
             return
         }
         selectMainTab(CATEGORY_TAB_INDEX)
@@ -999,7 +1012,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>(),
 
     override fun toCctvLive() {
         if (!binding.myTabView.isCctvLiveButtonVisible()) {
-            Toast.makeText(this, R.string.cctv_live_entry_disabled, Toast.LENGTH_SHORT).show()
+            AppToast.show(this, getString(R.string.cctv_live_entry_disabled))
             return
         }
         // 与 Tab 点击行为保持一致：CCTV tab 不持有 Fragment，直接进 Marmot 播放器
@@ -1039,6 +1052,15 @@ class MainActivity : BaseActivity<ActivityMainBinding>(),
         var current: View? = view
         while (current != null) {
             if (current is RecyclerView) return true
+            current = current.parent as? View
+        }
+        return false
+    }
+
+    private fun isInsideTabLayout(view: View): Boolean {
+        var current: View? = view
+        while (current != null) {
+            if (current is TabLayout) return true
             current = current.parent as? View
         }
         return false

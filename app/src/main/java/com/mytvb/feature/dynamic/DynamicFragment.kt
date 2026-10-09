@@ -84,7 +84,9 @@ class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarg
     private var lastFocusedVideoPosition = 0
     private var pendingScrollToTop = false
     private var pendingVideoFocusRestoreOnResume = false
-    private var preferredContentFocusTarget = ContentFocusTarget.LEFT_UP_LIST
+    // 初始焦点必须落视频网格：触底翻页依赖焦点落卡(onItemFocused→checkLoadMore)，
+    // 默认 LEFT_UP_LIST 时 DOWN 只在 UP 列表移动，视频区永远停在第一页(用户体感"下滑不刷新")
+    private var preferredContentFocusTarget = ContentFocusTarget.RIGHT_VIDEO_LIST
     private var videoFocusController: TvListFocusController? = null
     private var currentOpenStartMs = 0L
     private var latestVideoRequestStartMs = 0L
@@ -531,6 +533,10 @@ class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarg
                                 },
                                 onFirstFrame = {
                                     onDynamicFirstFrame(page)
+                                    // 触屏下滑依赖 onScrolled(dy>0)，首屏不足一屏时列表无滚动空间、
+                                    // 滑动不产生滚动事件，触底加载死锁；首帧落地即预取把列表撑出
+                                    // 滚动空间(onAppendRest 仅分批渲染时回调，一批全渲染不触发)
+                                    checkLoadMore()
                                 },
                                 onAppendRest = {
                                     videoFocusController?.onDataChanged(TvDataChangeReason.APPEND)
@@ -1009,11 +1015,15 @@ class DynamicFragment : BaseFragment<FragmentDynamicBinding>(), MainTabFocusTarg
             binding.recyclerViewRight.post {
                 if (isAdded && view != null && videoAdapter.itemCount > 0) {
                     val focused = activity?.currentFocus
+                    // 功能栏(myTabView)是进入本页的入口，CENTER 选中后焦点天然停留其上，
+                    // 不算"用户已移走焦点"，必须放行引导；仅焦点在搜索框/其它浮层时才让位
+                    val tabBar = activity?.findViewById<View>(R.id.myTabView)
                     if (focused != null &&
                         focused !== binding.recyclerViewRight &&
                         focused !== binding.recyclerViewLeft &&
                         !focused.isDescendantOf(binding.recyclerViewRight) &&
-                        !focused.isDescendantOf(binding.recyclerViewLeft)
+                        !focused.isDescendantOf(binding.recyclerViewLeft) &&
+                        (tabBar == null || !focused.isDescendantOf(tabBar))
                     ) {
                         return@post
                     }

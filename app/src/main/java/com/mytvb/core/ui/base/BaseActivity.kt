@@ -1,7 +1,10 @@
 package com.mytvb.core.ui.base
 
+import android.content.Context
+import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
+import android.view.LayoutInflater
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -21,12 +24,31 @@ abstract class BaseActivity<VB : ViewBinding> : AppCompatActivity() {
 
     protected val appSettings: AppSettingsDataStore by inject()
 
+    override fun attachBaseContext(newBase: Context) {
+        // 首个 Activity 此刻 Koin 尚未启动，refresh 只能发生在 onCreate，
+        // 此处先用缓存档位把 density 钉住，保证首个 inflate 就走正确倍率
+        UiScale.apply(newBase.resources)
+        super.attachBaseContext(newBase)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         (application as? MyBLBLApplication)?.ensureUiRuntimeReady("${this::class.java.simpleName}.onCreate")
         // 必须在 super.onCreate 之前安装：AppCompat 检测到已有 Factory 会跳过自装
         UiTextScale.refresh(appSettings)
+        UiScale.refresh(
+            appSettings,
+            resources.displayMetrics.widthPixels,
+            resources.displayMetrics.heightPixels
+        )
+        UiScale.apply(resources)
+        // 自绘卡片等走 applicationContext 的 Resources，recreate 后须同步钉到新档位
+        application.resources?.let { UiScale.apply(it) }
         UiCardSize.refresh(appSettings)
         UiTextScaleFactory.install(layoutInflater)
+        // `LayoutInflater.from(this)` 是 ContextThemeWrapper 缓存的那份 inflater
+        // （RecyclerView item、Dialog 布局等走它），与 layoutInflater 是两个实例，
+        // 需单独装密度守卫，避免系统重置密度后这些 inflate 的页面放大
+        UiTextScaleFactory.installDensityGuard(LayoutInflater.from(this))
         applyTheme()
         super.onCreate(savedInstanceState)
         configureWindowChrome()
@@ -47,15 +69,32 @@ abstract class BaseActivity<VB : ViewBinding> : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // 栈下旧 Activity 恢复时按当前档位重钉（设置变更后返回时保持全栈一致）
+        UiScale.apply(resources)
         if (!initialFullscreenModeDeferred) {
             applyFullscreenMode()
         }
     }
 
+    /**
+     * 声明 configChanges 的 Activity 在系统配置变化（系统栏显隐、方向/窗口尺寸切换）时
+     * 不重建，但系统会用真实显示指标重置 DisplayMetrics，把钉住的 density 抹掉；
+     * 在回调末尾补钉，否则此后新 inflate 的页面（如设置页）会整体放大数倍。
+     */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        UiScale.apply(resources)
+        application.resources?.let { UiScale.apply(it) }
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus && !initialFullscreenModeDeferred) {
-            applyFullscreenMode()
+        if (hasFocus) {
+            // 窗口重新获得焦点（含系统栏显隐、从播放页返回）后再补一次，缩短密度错误窗口
+            UiScale.apply(resources)
+            if (!initialFullscreenModeDeferred) {
+                applyFullscreenMode()
+            }
         }
     }
 

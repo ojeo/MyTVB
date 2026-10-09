@@ -11,6 +11,7 @@ import android.view.View
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.mytvb.R
 import com.mytvb.core.ui.base.ScaledTextView
 import com.mytvb.core.common.log.AppLog
 import com.mytvb.model.interaction.InteractionEdgeDimensionModel
@@ -255,7 +256,10 @@ class InteractionOverlayView @JvmOverloads constructor(
     private fun startCountdown(durationSec: Long, choices: List<InteractionEdgeQuestionChoiceModel>) {
         val durationMs = durationSec * 1000L
         val countdownView = ScaledTextView(context).apply {
-            textSize = 18f
+            setTextSize(
+                android.util.TypedValue.COMPLEX_UNIT_PX,
+                resources.getDimension(R.dimen.px44)
+            )
             setTextColor(0xFFFF4444.toInt())
             setTypeface(Typeface.DEFAULT, Typeface.BOLD)
             setPadding(dp(8), dp(8), dp(8), dp(8))
@@ -318,7 +322,10 @@ class InteractionOverlayView @JvmOverloads constructor(
         if (backButton == null) {
             backButton = ScaledTextView(context).apply {
                 text = "←"
-                textSize = 22f
+                setTextSize(
+                    android.util.TypedValue.COMPLEX_UNIT_PX,
+                    resources.getDimension(R.dimen.px48)
+                )
                 setTextColor(0xFFFFFFFF.toInt())
                 gravity = Gravity.CENTER
                 isFocusable = true
@@ -360,7 +367,10 @@ class InteractionOverlayView @JvmOverloads constructor(
 
         if (variablesTextView == null) {
             variablesTextView = ScaledTextView(context).apply {
-                textSize = 12f
+                setTextSize(
+                    android.util.TypedValue.COMPLEX_UNIT_PX,
+                    resources.getDimension(R.dimen.px26)
+                )
                 setTextColor(0xFFFFFFFF.toInt())
                 setTypeface(Typeface.DEFAULT, Typeface.BOLD)
                 setPadding(dp(8), dp(4), dp(8), dp(4))

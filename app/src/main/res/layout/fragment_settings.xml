@@ -88,7 +88,7 @@
             app:layout_constraintStart_toEndOf="@+id/button_setting_common"/>
 
         <androidx.appcompat.widget.LinearLayoutCompat
-            android:id="@+id/button_setting_play"
+            android:id="@+id/button_setting_display"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_marginTop="@dimen/px20"
@@ -107,6 +107,40 @@
             <androidx.appcompat.widget.AppCompatImageView
                 android:layout_width="@dimen/px50"
                 android:layout_height="@dimen/px50"
+                app:srcCompat="@drawable/ic_display"
+                app:tint="?android:attr/textColorPrimary"/>
+            <androidx.appcompat.widget.AppCompatTextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="@dimen/px20"
+                android:layout_marginStart="@dimen/px20"
+                android:layout_weight="1"
+                android:text="@string/display_setting"
+                android:textColor="?android:attr/textColorPrimary"
+                android:textSize="@dimen/px30"
+                android:textStyle="bold"/>
+        </androidx.appcompat.widget.LinearLayoutCompat>
+
+        <androidx.appcompat.widget.LinearLayoutCompat
+            android:id="@+id/button_setting_play"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/px20"
+            android:background="@drawable/cell_background"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="@dimen/px30"
+            android:paddingTop="@dimen/px20"
+            android:paddingEnd="@dimen/px30"
+            android:paddingBottom="@dimen/px20"
+            app:layout_constraintEnd_toEndOf="@+id/button_setting_display"
+            app:layout_constraintStart_toStartOf="@+id/button_setting_display"
+            app:layout_constraintTop_toBottomOf="@+id/button_setting_display">
+            <androidx.appcompat.widget.AppCompatImageView
+                android:layout_width="@dimen/px50"
+                android:layout_height="@dimen/px50"
                 app:srcCompat="@drawable/ic_video_play_count"
                 app:tint="?android:attr/textColorPrimary"/>
             <androidx.appcompat.widget.AppCompatTextView
@@ -116,6 +150,40 @@
                 android:layout_marginStart="@dimen/px20"
                 android:layout_weight="1"
                 android:text="@string/play_setting"
+                android:textColor="?android:attr/textColorPrimary"
+                android:textSize="@dimen/px30"
+                android:textStyle="bold"/>
+        </androidx.appcompat.widget.LinearLayoutCompat>
+
+        <androidx.appcompat.widget.LinearLayoutCompat
+            android:id="@+id/button_setting_player_ui"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/px20"
+            android:background="@drawable/cell_background"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="@dimen/px30"
+            android:paddingTop="@dimen/px20"
+            android:paddingEnd="@dimen/px30"
+            android:paddingBottom="@dimen/px20"
+            app:layout_constraintEnd_toEndOf="@+id/button_setting_play"
+            app:layout_constraintStart_toStartOf="@+id/button_setting_play"
+            app:layout_constraintTop_toBottomOf="@+id/button_setting_play">
+            <androidx.appcompat.widget.AppCompatImageView
+                android:layout_width="@dimen/px50"
+                android:layout_height="@dimen/px50"
+                app:srcCompat="@drawable/ic_player_ui"
+                app:tint="?android:attr/textColorPrimary"/>
+            <androidx.appcompat.widget.AppCompatTextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="@dimen/px20"
+                android:layout_marginStart="@dimen/px20"
+                android:layout_weight="1"
+                android:text="@string/player_ui_setting"
                 android:textColor="?android:attr/textColorPrimary"
                 android:textSize="@dimen/px30"
                 android:textStyle="bold"/>
@@ -135,9 +203,9 @@
             android:paddingTop="@dimen/px20"
             android:paddingEnd="@dimen/px30"
             android:paddingBottom="@dimen/px20"
-            app:layout_constraintEnd_toEndOf="@+id/button_setting_play"
-            app:layout_constraintStart_toStartOf="@+id/button_setting_play"
-            app:layout_constraintTop_toBottomOf="@+id/button_setting_play">
+            app:layout_constraintEnd_toEndOf="@+id/button_setting_player_ui"
+            app:layout_constraintStart_toStartOf="@+id/button_setting_player_ui"
+            app:layout_constraintTop_toBottomOf="@+id/button_setting_player_ui">
             <androidx.appcompat.widget.AppCompatImageView
                 android:layout_width="@dimen/px50"
                 android:layout_height="@dimen/px50"
@@ -155,43 +223,7 @@
                 android:textStyle="bold"/>
         </androidx.appcompat.widget.LinearLayoutCompat>
 
-        <androidx.appcompat.widget.LinearLayoutCompat
-            android:id="@+id/button_setting_device"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="@dimen/px20"
-            android:background="@drawable/cell_background"
-            android:clickable="true"
-            android:focusable="true"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingStart="@dimen/px30"
-            android:paddingTop="@dimen/px20"
-            android:paddingEnd="@dimen/px30"
-            android:paddingBottom="@dimen/px20"
-            android:nextFocusDown="@id/button_setting_device"
-            app:layout_constraintEnd_toEndOf="@+id/button_setting_tv"
-            app:layout_constraintStart_toStartOf="@+id/button_setting_tv"
-            app:layout_constraintTop_toBottomOf="@+id/button_setting_tv">
-            <androidx.appcompat.widget.AppCompatImageView
-                android:layout_width="@dimen/px50"
-                android:layout_height="@dimen/px50"
-                android:padding="@dimen/px2"
-                app:srcCompat="@drawable/ic_tv"
-                app:tint="?android:attr/textColorPrimary"/>
-            <androidx.appcompat.widget.AppCompatTextView
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginLeft="@dimen/px20"
-                android:layout_marginStart="@dimen/px20"
-                android:layout_weight="1"
-                android:text="@string/device_info"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textSize="@dimen/px30"
-                android:textStyle="bold"/>
-        </androidx.appcompat.widget.LinearLayoutCompat>
-
-        <!-- 青少年模式分类（位于弹幕与电视直播之间） -->
+        <!-- 青少年模式分类（位于弹幕与关于之间） -->
         <androidx.appcompat.widget.LinearLayoutCompat
             android:id="@+id/button_setting_teen"
             android:layout_width="0dp"
@@ -226,9 +258,9 @@
                 android:textStyle="bold"/>
         </androidx.appcompat.widget.LinearLayoutCompat>
 
-        <!-- 电视直播分类（位于青少年模式与设备信息之间） -->
+        <!-- 关于：应用版本/检查更新/组件/诊断/设备信息 -->
         <androidx.appcompat.widget.LinearLayoutCompat
-            android:id="@+id/button_setting_tv"
+            android:id="@+id/button_setting_about"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_marginTop="@dimen/px20"
@@ -236,6 +268,7 @@
             android:clickable="true"
             android:focusable="true"
             android:gravity="center_vertical"
+            android:nextFocusDown="@id/button_setting_about"
             android:orientation="horizontal"
             android:paddingStart="@dimen/px30"
             android:paddingTop="@dimen/px20"
@@ -247,8 +280,7 @@
             <androidx.appcompat.widget.AppCompatImageView
                 android:layout_width="@dimen/px50"
                 android:layout_height="@dimen/px50"
-                android:padding="@dimen/px2"
-                app:srcCompat="@drawable/ic_cctv"
+                app:srcCompat="@drawable/ic_about"
                 app:tint="?android:attr/textColorPrimary"/>
             <androidx.appcompat.widget.AppCompatTextView
                 android:layout_width="0dp"
@@ -256,7 +288,7 @@
                 android:layout_marginLeft="@dimen/px20"
                 android:layout_marginStart="@dimen/px20"
                 android:layout_weight="1"
-                android:text="@string/setting_tv_live"
+                android:text="@string/about_setting"
                 android:textColor="?android:attr/textColorPrimary"
                 android:textSize="@dimen/px30"
                 android:textStyle="bold"/>

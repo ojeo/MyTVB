@@ -5,57 +5,106 @@ import android.view.ViewGroup
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
+import com.mytvb.R
 import com.mytvb.databinding.CellSettingBinding
+import com.mytvb.databinding.CellSettingHeadBinding
 import com.mytvb.model.SettingModel
+
+/** 列表行：组头 或 组内设置条目（slot 标记其在组框中的拼接位置）。 */
+sealed interface SettingRow {
+    data class Header(val title: String) : SettingRow
+    data class Item(val model: SettingModel, val slot: Int) : SettingRow
+}
 
 class SettingAdapter(
     private val onItemClick: ((position: Int, item: SettingModel) -> Unit)? = null
-) : ListAdapter<SettingModel, SettingAdapter.SettingViewHolder>(DIFF_CALLBACK) {
-
-    private var focusedPosition = RecyclerView.NO_POSITION
+) : ListAdapter<SettingRow, RecyclerView.ViewHolder>(DIFF_CALLBACK) {
 
     companion object {
+        const val SLOT_FIRST = 0
+        const val SLOT_MIDDLE = 1
+        const val SLOT_LAST = 2
+        const val SLOT_SINGLE = 3
+
+        private const val TYPE_HEADER = 0
+        private const val TYPE_ITEM = 1
         private const val PAYLOAD_FOCUS = "payload_focus"
 
-        private val DIFF_CALLBACK = object : DiffUtil.ItemCallback<SettingModel>() {
-            override fun areItemsTheSame(oldItem: SettingModel, newItem: SettingModel): Boolean {
-                return oldItem.title == newItem.title
+        private val DIFF_CALLBACK = object : DiffUtil.ItemCallback<SettingRow>() {
+            override fun areItemsTheSame(oldItem: SettingRow, newItem: SettingRow): Boolean {
+                return when {
+                    oldItem is SettingRow.Header && newItem is SettingRow.Header ->
+                        oldItem.title == newItem.title
+                    oldItem is SettingRow.Item && newItem is SettingRow.Item ->
+                        oldItem.model.key == newItem.model.key
+                    else -> false
+                }
             }
 
-            override fun areContentsTheSame(oldItem: SettingModel, newItem: SettingModel): Boolean {
-                return oldItem.title == newItem.title && oldItem.info == newItem.info
+            override fun areContentsTheSame(oldItem: SettingRow, newItem: SettingRow): Boolean {
+                return when {
+                    oldItem is SettingRow.Header && newItem is SettingRow.Header ->
+                        oldItem.title == newItem.title
+                    oldItem is SettingRow.Item && newItem is SettingRow.Item ->
+                        oldItem.model.key == newItem.model.key &&
+                            oldItem.model.title == newItem.model.title &&
+                            oldItem.model.info == newItem.model.info &&
+                            oldItem.slot == newItem.slot
+                    else -> false
+                }
             }
         }
     }
 
-    fun setData(newItems: List<SettingModel>) {
+    private var focusedPosition = RecyclerView.NO_POSITION
+
+    fun setData(newRows: List<SettingRow>) {
         focusedPosition = RecyclerView.NO_POSITION
-        submitList(newItems)
+        submitList(newRows)
     }
 
-    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): SettingViewHolder {
-        val binding = CellSettingBinding.inflate(
-            LayoutInflater.from(parent.context),
-            parent,
-            false
-        )
-        return SettingViewHolder(binding)
+    override fun getItemViewType(position: Int): Int {
+        return if (getItem(position) is SettingRow.Header) TYPE_HEADER else TYPE_ITEM
     }
 
-    override fun onBindViewHolder(holder: SettingViewHolder, position: Int) {
-        holder.bind(getItem(position), position)
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+        val inflater = LayoutInflater.from(parent.context)
+        return if (viewType == TYPE_HEADER) {
+            HeaderViewHolder(CellSettingHeadBinding.inflate(inflater, parent, false))
+        } else {
+            SettingViewHolder(CellSettingBinding.inflate(inflater, parent, false))
+        }
+    }
+
+    override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+        when (val row = getItem(position)) {
+            is SettingRow.Header -> (holder as HeaderViewHolder).bind(row)
+            is SettingRow.Item -> (holder as SettingViewHolder).bind(row)
+        }
     }
 
     override fun onBindViewHolder(
-        holder: SettingViewHolder,
+        holder: RecyclerView.ViewHolder,
         position: Int,
         payloads: MutableList<Any>
     ) {
         if (payloads.isEmpty()) {
             super.onBindViewHolder(holder, position, payloads)
-        } else {
-            holder.bindContent(getItem(position))
-            holder.bindFocusState(position == focusedPosition, position)
+            return
+        }
+        val row = getItem(position)
+        if (row is SettingRow.Item && holder is SettingViewHolder) {
+            holder.bindContent(row)
+            holder.bindFocusState(position == focusedPosition, row.slot)
+        }
+    }
+
+    class HeaderViewHolder(
+        private val binding: CellSettingHeadBinding
+    ) : RecyclerView.ViewHolder(binding.root) {
+
+        fun bind(row: SettingRow.Header) {
+            binding.tvGroupTitle.text = row.title
         }
     }
 
@@ -66,8 +115,9 @@ class SettingAdapter(
         init {
             binding.clickView.setOnClickListener {
                 val position = bindingAdapterPosition
-                if (position != RecyclerView.NO_POSITION) {
-                    onItemClick?.invoke(position, currentList[position])
+                val row = currentList.getOrNull(position)
+                if (position != RecyclerView.NO_POSITION && row is SettingRow.Item) {
+                    onItemClick?.invoke(position, row.model)
                 }
             }
             binding.clickView.setOnFocusChangeListener { _, hasFocus ->
@@ -91,37 +141,37 @@ class SettingAdapter(
             }
         }
 
-        fun bind(item: SettingModel, position: Int) {
-            bindContent(item)
-            bindFocusState(bindingAdapterPosition == focusedPosition, position)
+        fun bind(row: SettingRow.Item) {
+            bindContent(row)
+            bindFocusState(bindingAdapterPosition == focusedPosition, row.slot)
         }
 
-        fun bindContent(item: SettingModel) {
-            binding.tvTitle.text = item.title
-            binding.tvInfo.text = item.info
+        fun bindContent(row: SettingRow.Item) {
+            binding.tvTitle.text = row.model.title
+            binding.tvInfo.text = row.model.info
         }
 
-        private fun bindStripe(position: Int) {
-            if (position % 2 == 0) {
-                binding.clickView.setBackgroundResource(com.mytvb.R.drawable.cell_setting_background)
-            } else {
-                binding.clickView.background = null
-            }
-        }
-
-        fun bindFocusState(isFocused: Boolean, position: Int) {
+        fun bindFocusState(isFocused: Boolean, slot: Int) {
             binding.iconArrow.alpha = if (isFocused) 1f else 0.6f
             binding.tvInfo.alpha = if (isFocused) 1f else 0.8f
             if (isFocused) {
-                binding.clickView.setBackgroundResource(com.mytvb.R.drawable.cell_background)
+                binding.clickView.setBackgroundResource(R.drawable.cell_background)
             } else {
-                bindStripe(position)
+                binding.clickView.setBackgroundResource(slotBackground(slot))
             }
             binding.clickView.animate()
                 .scaleX(if (isFocused) 1.02f else 1f)
                 .scaleY(if (isFocused) 1.02f else 1f)
                 .setDuration(120L)
                 .start()
+        }
+
+        /** 非聚焦态按组内位置取拼接背景：单条组保持原独立卡片样式。 */
+        private fun slotBackground(slot: Int): Int = when (slot) {
+            SLOT_FIRST -> R.drawable.cell_setting_group_first
+            SLOT_MIDDLE -> R.drawable.cell_setting_group_middle
+            SLOT_LAST -> R.drawable.cell_setting_group_last
+            else -> R.drawable.cell_setting_background
         }
     }
 }

@@ -45,6 +45,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import org.koin.android.ext.android.inject
 import java.util.Locale
+import com.mytvb.core.ui.base.DialogWindowFit
 
 class VideoDetailFragment : androidx.fragment.app.Fragment() {
 
@@ -717,6 +718,12 @@ class VideoDetailFragment : androidx.fragment.app.Fragment() {
         dialog.setCanceledOnTouchOutside(true)
         dialog.setOnCancelListener { /* back key or touch outside */ }
         dialog.show()
+        // 简介可能很长：高度超屏时钳到 92% 屏高由 ScrollView 滚动展示
+        DialogWindowFit.apply(
+            dialog.window, requireContext(),
+            resources.getDimensionPixelSize(R.dimen.px1200),
+            resources.getDimensionPixelSize(R.dimen.px800)
+        )
     }
 
 

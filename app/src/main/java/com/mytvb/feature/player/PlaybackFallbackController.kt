@@ -134,6 +134,8 @@ internal class PlaybackFallbackController(
     private var fallbackAttemptCount: Int = 0
     private val attemptedFallbackSignatures = linkedSetOf<String>()
     private var lastPlaybackPositionMs: Long = 0L
+    /** 已触发过降档重建的锁定画质，防止同档失败后反复重建。 */
+    private val qualityStepdownAttemptedIds = linkedSetOf<Int>()
 
     // ===== 公开 API（供 ViewModel 调用） =====
 
@@ -174,6 +176,9 @@ internal class PlaybackFallbackController(
         }
 
         if (!handled) {
+            if (tryLowerQualityRebuild()) {
+                return
+            }
             val qualityLocked = dashSession?.routePlan?.qualityId
                 ?: streamPlan?.qualityId
                 ?: 0
@@ -203,6 +208,49 @@ internal class PlaybackFallbackController(
         playInfoRefreshRetryCount = 0
         fallbackAttemptCount = 0
         attemptedFallbackSignatures.clear()
+        qualityStepdownAttemptedIds.clear()
+    }
+
+    /**
+     * 全路由耗尽后的画质降档重建：HDR/杜比/4K 等高画质档在该档内往往只有 HEVC 一种流，
+     * 没有 AVC 兜底路由，解码失败只会在同档换 CDN/刷新打转；此时跳到下一档重新拉流，
+     * 请求层（requestPlayInfoWithQualityFallback）会自动落到服务端实际可用的最高档。
+     */
+    private fun tryLowerQualityRebuild(): Boolean {
+        val lockedQualityId = context.dashSession?.routePlan?.qualityId
+            ?: context.streamFallbackPlan?.qualityId
+            ?: 0
+        if (lockedQualityId <= 80 || lockedQualityId in qualityStepdownAttemptedIds) {
+            return false
+        }
+        val candidates = qualityPolicy.buildCandidates(lockedQualityId).drop(1)
+        val nextQualityId = candidates.firstOrNull() ?: return false
+        val identity = context.currentPlayRequestIdentity() ?: return false
+        qualityStepdownAttemptedIds.add(lockedQualityId)
+        AppLog.i(
+            TAG,
+            "fallback:quality_stepdown from=$lockedQualityId to=$nextQualityId position=$lastPlaybackPositionMs"
+        )
+        scope.launch {
+            val preparedPlayback = context.requestPreparedPlayback(
+                identity = identity,
+                preferLastPlayTime = false,
+                replaceInPlace = true,
+                playbackPositionMs = lastPlaybackPositionMs,
+                playWhenReady = true,
+                qualityCandidates = candidates
+            )
+            if (preparedPlayback != null) {
+                context.applyPreparedPlayback(
+                    preparedPlayback = preparedPlayback,
+                    resetFallbackAttempts = true,
+                    countCurrentAttemptAsFallback = false
+                )
+            } else {
+                context.reportError(appContext.getString(R.string.player_error_all_routes_unavailable))
+            }
+        }
+        return true
     }
 
     /**

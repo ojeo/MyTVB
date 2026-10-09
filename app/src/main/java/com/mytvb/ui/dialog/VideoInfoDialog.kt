@@ -7,6 +7,7 @@ import androidx.appcompat.app.AppCompatDialog
 import com.mytvb.R
 import com.mytvb.databinding.DialogVideoInfoBinding
 import com.mytvb.core.ui.image.ImageLoader
+import com.mytvb.core.ui.base.DialogWindowFit
 
 class VideoInfoDialog(
     context: Context,
@@ -21,6 +22,11 @@ class VideoInfoDialog(
         supportRequestWindowFeature(Window.FEATURE_NO_TITLE)
         setContentView(binding.root)
         setCanceledOnTouchOutside(true)
+        DialogWindowFit.apply(
+            window, context,
+            context.resources.getDimensionPixelSize(R.dimen.px1200),
+            context.resources.getDimensionPixelSize(R.dimen.px615)
+        )
         bindContent()
         binding.buttonClose.setOnClickListener { dismiss() }
     }

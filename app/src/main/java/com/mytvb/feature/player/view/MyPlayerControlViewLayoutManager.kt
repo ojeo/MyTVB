@@ -37,6 +37,8 @@ class MyPlayerControlViewLayoutManager(
     private val overflowHideButton: View = playerControlView.findViewById(R.id.exo_overflow_hide)
     private val orderedButtons: List<View> = listOf(
         playerControlView.findViewById(R.id.button_play),
+        playerControlView.findViewById(R.id.button_comment),
+        playerControlView.findViewById(R.id.button_more),
         playerControlView.findViewById(R.id.button_refresh),
         playerControlView.findViewById(R.id.button_previous),
         playerControlView.findViewById(R.id.button_next),
@@ -47,7 +49,6 @@ class MyPlayerControlViewLayoutManager(
         playerControlView.findViewById(R.id.button_play_speed),
         playerControlView.findViewById(R.id.exo_settings),
         playerControlView.findViewById(R.id.button_choose_episode),
-        playerControlView.findViewById(R.id.button_more),
         playerControlView.findViewById(R.id.button_up_info),
         playerControlView.findViewById(R.id.button_subtitle),
         playerControlView.findViewById(R.id.button_related),
@@ -61,6 +62,7 @@ class MyPlayerControlViewLayoutManager(
         R.id.button_related,
         R.id.button_subtitle,
         R.id.button_up_info,
+        R.id.button_comment,
         R.id.button_more,
         R.id.button_choose_episode,
         R.id.button_refresh,
@@ -119,7 +121,8 @@ class MyPlayerControlViewLayoutManager(
         playerControlView.post {
             if (fromSeekProgress && !focusPlayPause) {
                 playerControlView.requestTimeBarFocus()
-            } else {
+            } else if (!timeBar.hasFocus()) {
+                // 焦点已在进度条上时不要抢给播放按钮（timebar 快进后恢复控制栏的场景）
                 playerControlView.requestPlayPauseFocus()
             }
         }
@@ -201,6 +204,18 @@ class MyPlayerControlViewLayoutManager(
         } else {
             playerControlView.postDelayed(hideMainBarRunnable, playerControlView.getShowTimeoutMs().toLong())
         }
+    }
+
+    /**
+     * 瞬时进度条模式的松手收尾（blbl 节奏）：保持只有进度条+时间，
+     * PROGRESS_ONLY_DURATION_MS 后由 hideProgressBar 动画淡出。
+     * 返回 false 表示当前状态不适用（如持久细条模式），调用方需自行立即收起。
+     */
+    fun scheduleProgressOnlyFadeOutIfApplicable(): Boolean {
+        if (uxState != UX_STATE_ONLY_PROGRESS_VISIBLE || !progressOnlyUiEnabled) return false
+        removeHideCallbacks()
+        playerControlView.postDelayed(hideProgressBarRunnable, PROGRESS_ONLY_DURATION_MS)
+        return true
     }
 
     fun hideInfoOnlyLeftTimeBar() {
@@ -375,6 +390,7 @@ class MyPlayerControlViewLayoutManager(
         playerControlView.visibility = View.VISIBLE
         controlsBackground.visibility = View.VISIBLE
         bottomBar.visibility = View.VISIBLE
+        centerControls.translationY = -hiddenTranslationY
         if (timeViewVisible) timeView.visibility = View.VISIBLE
         bottomBar.animate()
             .translationY(0f)
@@ -397,18 +413,16 @@ class MyPlayerControlViewLayoutManager(
         setUxState(UX_STATE_ANIMATING_SHOW)
         timeBar.showScrubber(ANIMATION_DURATION_MS)
         playerControlView.startProgressUpdates()
+        // 顶栏下落与底部栏升起同时启动、同时长收尾，避免一前一后错拍
         bottomBar.animate()
             .translationY(0f)
             .setDuration(ANIMATION_DURATION_MS)
-            .setListener(object : AnimatorListenerAdapter() {
-                override fun onAnimationEnd(animation: Animator) {
-                    animateMainInfo(visible = true) {
-                        setUxState(UX_STATE_ALL_VISIBLE)
-                        resetHideCallbacks()
-                    }
-                }
-            })
+            .setListener(null)
             .start()
+        animateMainInfo(visible = true) {
+            setUxState(UX_STATE_ALL_VISIBLE)
+            resetHideCallbacks()
+        }
     }
 
     private fun animateMainInfo(visible: Boolean, endAction: () -> Unit) {
@@ -445,6 +459,7 @@ class MyPlayerControlViewLayoutManager(
             .start()
         centerControls.animate()
             .alpha(targetAlpha)
+            .translationY(if (visible) 0f else -hiddenTranslationY)
             .setDuration(ANIMATION_DURATION_MS)
             .setListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
@@ -686,6 +701,7 @@ class MyPlayerControlViewLayoutManager(
         controlsBackground.alpha = initialAlpha
         centerControls.visibility = View.VISIBLE
         centerControls.alpha = initialAlpha
+        centerControls.translationY = if (initialAlpha == 0f) -hiddenTranslationY else 0f
         bottomBar.visibility = View.VISIBLE
         bottomBar.alpha = 1f
         bottomBar.translationY = 0f

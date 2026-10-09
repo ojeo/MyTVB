@@ -21,6 +21,7 @@ internal class PlayerControlFocusCoordinator(
     private val buttonChooseEpisode: View,
     private val buttonMore: View,
     private val buttonUpInfo: View,
+    private val buttonComment: View,
     private val buttonSubtitle: View,
     private val buttonRelated: View,
     private val buttonRepeat: View,
@@ -28,6 +29,7 @@ internal class PlayerControlFocusCoordinator(
     private val buttonRefresh: View,
     private val buttonLine: View,
     private val buttonClose: View,
+    private val buttonBack: View,
     private val timeBar: View,
     private val bottomBar: ViewGroup
 ) {
@@ -44,6 +46,7 @@ internal class PlayerControlFocusCoordinator(
         EPISODE,
         MORE,
         OWNER,
+        COMMENT,
         SUBTITLE,
         RELATED,
         REPEAT,
@@ -51,6 +54,7 @@ internal class PlayerControlFocusCoordinator(
         REFRESH,
         LINE,
         CLOSE,
+        BACK,
         TIME_BAR
     }
 
@@ -205,6 +209,10 @@ internal class PlayerControlFocusCoordinator(
         requestFocusOrFallback(buttonUpInfo)
     }
 
+    fun requestCommentButtonFocus() {
+        requestFocusOrFallback(buttonComment)
+    }
+
     fun requestSubtitleButtonFocus() {
         requestFocusOrFallback(buttonSubtitle)
     }
@@ -222,6 +230,7 @@ internal class PlayerControlFocusCoordinator(
             buttonChooseEpisode.isFocused -> FocusTarget.EPISODE
             buttonMore.isFocused -> FocusTarget.MORE
             buttonUpInfo.isFocused -> FocusTarget.OWNER
+            buttonComment.isFocused -> FocusTarget.COMMENT
             buttonSubtitle.isFocused -> FocusTarget.SUBTITLE
             buttonRelated.isFocused -> FocusTarget.RELATED
             buttonRepeat.isFocused -> FocusTarget.REPEAT
@@ -229,6 +238,7 @@ internal class PlayerControlFocusCoordinator(
             buttonRefresh.isFocused -> FocusTarget.REFRESH
             buttonLine.isFocused -> FocusTarget.LINE
             buttonClose.isFocused -> FocusTarget.CLOSE
+            buttonBack.isFocused -> FocusTarget.BACK
             else -> FocusTarget.PLAY_PAUSE
         }
     }
@@ -246,6 +256,7 @@ internal class PlayerControlFocusCoordinator(
             FocusTarget.EPISODE -> requestEpisodeButtonFocus()
             FocusTarget.MORE -> requestMoreButtonFocus()
             FocusTarget.OWNER -> requestOwnerButtonFocus()
+            FocusTarget.COMMENT -> requestCommentButtonFocus()
             FocusTarget.SUBTITLE -> requestSubtitleButtonFocus()
             FocusTarget.RELATED -> requestRelatedButtonFocus()
             FocusTarget.REPEAT -> requestViewOrFallback(buttonRepeat)
@@ -253,6 +264,7 @@ internal class PlayerControlFocusCoordinator(
             FocusTarget.REFRESH -> requestViewOrFallback(buttonRefresh)
             FocusTarget.LINE -> requestViewOrFallback(buttonLine)
             FocusTarget.CLOSE -> requestViewOrFallback(buttonClose)
+            FocusTarget.BACK -> requestViewOrFallback(buttonBack)
             FocusTarget.TIME_BAR -> requestViewOrFallback(timeBar, requireEnabled = true)
         }
     }
@@ -269,13 +281,15 @@ internal class PlayerControlFocusCoordinator(
             buttonChooseEpisode.isFocused ||
             buttonMore.isFocused ||
             buttonUpInfo.isFocused ||
+            buttonComment.isFocused ||
             buttonSubtitle.isFocused ||
             buttonRelated.isFocused ||
             buttonRepeat.isFocused ||
             buttonLiveSettings.isFocused ||
             buttonRefresh.isFocused ||
             buttonLine.isFocused ||
-            buttonClose.isFocused
+            buttonClose.isFocused ||
+            buttonBack.isFocused
     }
 
     private fun requestFocusOrFallback(target: View) {

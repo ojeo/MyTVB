@@ -76,6 +76,8 @@ class MyBLBLApplication : Application() {
         // 多进程使用 WebView 时数据目录冲突会导致 X5/系统 WebView 初始化崩溃。
         initPieWebViewDataDir()
         AppLog.init(this)
+        // Toast 等使用 Application 级 Resources 的场景与 Activity 同倍率
+        com.mytvb.core.ui.base.UiScale.apply(resources)
         AppLog.i(TAG, "STARTUP T0 app.onCreate start")
         AppLog.i(TAG, "STARTUP T1 app.onCreate end minimal elapsed=${SystemClock.elapsedRealtime() - startMs}ms")
     }

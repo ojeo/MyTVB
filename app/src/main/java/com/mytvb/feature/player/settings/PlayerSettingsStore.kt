@@ -32,7 +32,6 @@ data class PlayerSettings(
     val subtitlePreferredLan: String = "",
     val subtitleTextSizePx: Int = 45,
     val showBottomProgressBar: Boolean = false,
-    val showDebugInfo: Boolean = false,
     val simpleKeyPress: Boolean = false,
     val showRewindFastForward: Boolean = false,
     val showNextPrevious: Boolean = false,
@@ -48,10 +47,10 @@ data class PlayerSettings(
     val sponsorBlockEnabled: Boolean = false,
     val sponsorBlockAutoSkip: Boolean = true,
     // 音量均衡：PCM 级自适应响度归一（VolumeBalanceAudioProcessor），关/低/中/高四档。
-    // 取代旧的系统音效方案（DynamicsProcessing/LoudnessEnhancer——部分 TV 设备驱动有 bug 会失真）。
-    val audioBalance: AudioBalanceLevel = AudioBalanceLevel.OFF,
-    // 无缝切清晰度：满足条件时用多清晰度 DASH MPD 源替代单档源，切档不重建播放器。默认关闭。
-    val seamlessQualitySwitch: Boolean = false
+    // 取代旧的系统音效方案（DynamicsProcessing/LoudnessEnhancer——部分 TV 设备驱动有 bug 会失真）。默认中档。
+    val audioBalance: AudioBalanceLevel = AudioBalanceLevel.MEDIUM,
+    // 无缝切清晰度：满足条件时用多清晰度 DASH MPD 源替代单档源，切档不重建播放器。默认开启。
+    val seamlessQualitySwitch: Boolean = true
 )
 
 private object VideoQualityDefaults {
@@ -77,7 +76,6 @@ object PlayerSettingsStore {
     private const val KEY_SUBTITLE_PREFERRED_LAN = "subtitle_preferred_lan"
     private const val KEY_SUBTITLE_TEXT_SIZE = "subtitle_text_size"
     private const val KEY_SHOW_RE_FF = "show_re_ff"
-    private const val KEY_SHOW_DEBUG = "show_debug"
     private const val KEY_SIMPLE_KEY_PRESS = "simple_key_press"
     private const val KEY_SHOW_BOTTOM_PROGRESS_BAR = "show_bottom_progress_bar"
     private const val KEY_SHOW_NEXT_PREVIOUS = "show_next_previous"
@@ -116,8 +114,6 @@ object PlayerSettingsStore {
             append(readSetting(KEY_SUBTITLE_TEXT_SIZE).orEmpty())
             append("|")
             append(readSetting(KEY_SHOW_RE_FF).orEmpty())
-            append("|")
-            append(readSetting(KEY_SHOW_DEBUG).orEmpty())
             append("|")
             append(readSetting(KEY_SIMPLE_KEY_PRESS).orEmpty())
             append("|")
@@ -190,10 +186,6 @@ object PlayerSettingsStore {
                 readSetting(KEY_SHOW_BOTTOM_PROGRESS_BAR),
                 defaultValue = false
             ),
-            showDebugInfo = parseToggle(
-                readSetting(KEY_SHOW_DEBUG),
-                defaultValue = false
-            ),
             simpleKeyPress = parseToggle(
                 readSetting(KEY_SIMPLE_KEY_PRESS),
                 defaultValue = false
@@ -246,7 +238,7 @@ object PlayerSettingsStore {
             ),
             seamlessQualitySwitch = parseToggle(
                 readSetting(KEY_SEAMLESS_QUALITY_SWITCH),
-                defaultValue = false
+                defaultValue = true
             )
         )
         cachedSettings = settings
@@ -283,20 +275,20 @@ object PlayerSettingsStore {
         return when (value?.trim()?.uppercase()) {
             null, "" -> VideoQualityDefaults.DEFAULT_VIDEO_QUALITY_ID
             "AUTO", "自动" -> null
-            "8K" -> 127
+            "8K 超高清", "8K" -> 127
             "杜比视界", "DOLBYVISION" -> 126
             "HDR VIVID", "HDRVIVID" -> 129
-            "HDR" -> 125
-            "4K" -> 120
-            "1080P60" -> 116
-            "1080P+" -> 112
+            "HDR 真彩", "HDR 真彩色", "HDR" -> 125
+            "4K 超高清", "4K" -> 120
+            "1080P 60帧", "1080P60" -> 116
+            "1080P 高码率", "1080P+ 高码率", "1080P+" -> 112
             "智能修复", "SUPERRESOLUTION" -> 100
-            "1080P" -> 80
-            "720P60" -> 74
-            "720P" -> 64
-            "480P" -> 32
-            "360P" -> 16
-            "240P" -> 6
+            "1080P 高清", "1080P" -> 80
+            "720P 60帧", "720P60" -> 74
+            "720P 准高清", "720P" -> 64
+            "480P 标清", "480P" -> 32
+            "360P 流畅", "360P" -> 16
+            "240P 极速", "240P" -> 6
             else -> value.toIntOrNull()
         }
     }
@@ -333,13 +325,13 @@ object PlayerSettingsStore {
 
     /**
      * 音量均衡档位解析：新 key（关/低/中/高）优先；未设置过时回退旧布尔开关，
-     * 旧"开"映射到中档，其余（含从未设置）为关。
+     * 旧"关"尊重用户选择仍为关，其余（含从未设置）落到默认中档。
      */
     private fun parseAudioBalance(value: String?, legacyValue: String?): AudioBalanceLevel {
         if (!value.isNullOrBlank()) {
             return AudioBalanceLevel.fromSettingValue(value)
         }
-        return if (legacyValue?.trim() == "开") AudioBalanceLevel.MEDIUM else AudioBalanceLevel.OFF
+        return if (legacyValue?.trim() == "关") AudioBalanceLevel.OFF else AudioBalanceLevel.MEDIUM
     }
 
     // 换用新 key（subtitle_default_mode）后旧值（show_subtitle_default 的 关/开/自动）不再读取：

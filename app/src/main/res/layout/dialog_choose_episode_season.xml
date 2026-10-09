@@ -4,8 +4,8 @@
     android:background="@drawable/dialog_background_right_panel"
     android:clickable="true"
     android:focusable="true"
-    android:layout_width="@dimen/px600"
-    android:layout_height="@dimen/px935">
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
     <androidx.appcompat.widget.AppCompatTextView
         android:textSize="@dimen/px28"
         android:textStyle="bold"

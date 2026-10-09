@@ -37,7 +37,7 @@
         android:layout_marginTop="@dimen/px60"
         android:scaleType="centerCrop"
         android:contentDescription="Series Cover"
-        android:elevation="10dp"
+        android:elevation="@dimen/px23"
         app:layout_constraintDimensionRatio="h,3:4"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent"

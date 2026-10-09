@@ -116,7 +116,10 @@ class DebugLogFragment : BaseFragment<FragmentDebugLogBinding>() {
             val btn = ScaledTextView(requireContext()).apply {
                 text = option.label
                 setTextColor(Color.WHITE)
-                textSize = 12f
+                setTextSize(
+                    android.util.TypedValue.COMPLEX_UNIT_PX,
+                    resources.getDimension(R.dimen.px28)
+                )
                 setPadding(px30, px14, px30, px14)
                 isClickable = true
                 isFocusable = true

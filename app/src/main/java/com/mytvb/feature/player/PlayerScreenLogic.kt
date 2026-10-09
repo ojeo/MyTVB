@@ -20,45 +20,6 @@ import androidx.media3.exoplayer.ExoPlayer
  */
 internal object PlayerScreenLogic {
 
-    fun buildDebugInfo(context: Context, p: ExoPlayer): String {
-        val sb = StringBuilder()
-        val videoFormat = p.videoFormat
-        if (videoFormat != null) {
-            val w = videoFormat.width
-            val h = videoFormat.height
-            sb.appendLine(context.getString(R.string.player_debug_resolution_format, "${w}x${h}${MediaFormatUtils.formatAspectRatio(w, h)}"))
-            val codec = MediaFormatUtils.formatCodecName(videoFormat.sampleMimeType)
-            val bitrate = if (videoFormat.bitrate > 0) " ${videoFormat.bitrate / 1000}kbps" else ""
-            sb.appendLine(context.getString(R.string.player_debug_video_format, "$codec$bitrate"))
-        }
-        val audioFormat = p.audioFormat
-        if (audioFormat != null) {
-            val codec = MediaFormatUtils.formatCodecName(audioFormat.sampleMimeType)
-            val sr = if (audioFormat.sampleRate > 0) " ${audioFormat.sampleRate}Hz" else ""
-            sb.appendLine(context.getString(R.string.player_debug_audio_format, "$codec$sr"))
-        }
-        if (p.duration > 0) {
-            val pos = NumberUtils.formatTimeMs(p.currentPosition)
-            val dur = NumberUtils.formatTimeMs(p.duration)
-            val speed = p.playbackParameters.speed
-            sb.appendLine(context.getString(R.string.player_debug_progress_format, "$pos / $dur (${speed}x)"))
-        }
-        val bufferedAhead = p.bufferedPosition - p.currentPosition
-        if (bufferedAhead > 0) {
-            sb.appendLine(context.getString(R.string.player_debug_buffer_format, "%.1f".format(bufferedAhead / 1000.0) + "s"))
-        }
-        val stateLabel = when (p.playbackState) {
-            Player.STATE_BUFFERING -> context.getString(R.string.player_state_buffering)
-            Player.STATE_READY -> if (p.playWhenReady) context.getString(R.string.player_state_playing) else context.getString(R.string.pause)
-            Player.STATE_ENDED -> context.getString(R.string.player_state_ended)
-            else -> ""
-        }
-        if (stateLabel.isNotEmpty()) {
-            sb.append(context.getString(R.string.player_debug_state_format, stateLabel))
-        }
-        return sb.toString().trimEnd()
-    }
-
     /**
      * 音乐区判定：tid 3（音乐）及其全部子分区。详情接口返回的分区名 tname 常为空，
      * 且音乐区视频携带的是子分区 id 而非音乐分区 id（3），因此以已知子分区 id
@@ -80,20 +41,6 @@ internal object PlayerScreenLogic {
         val video = view ?: return false
         if (video.tid in MUSIC_ZONE_TIDS) return true
         return video.tname.contains("音乐")
-    }
-
-    /** 调试浮层文案；返回 null 表示应隐藏。 */
-    fun debugOverlayText(
-        context: Context,
-        showDebugInfo: Boolean,
-        errorMessage: String?,
-        player: Player?,
-        loadingText: String
-    ): String? {
-        if (!showDebugInfo) return null
-        if (!errorMessage.isNullOrBlank()) return errorMessage
-        if (player == null || player.playbackState == Player.STATE_IDLE) return loadingText
-        return (player as? ExoPlayer)?.let { buildDebugInfo(context, it) } ?: loadingText
     }
 
     fun postPlaybackProgressEvent(

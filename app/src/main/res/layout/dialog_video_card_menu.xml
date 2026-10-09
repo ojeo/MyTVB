@@ -45,8 +45,19 @@
             android:background="@color/fourthBackgroundColor" />
     </androidx.appcompat.widget.LinearLayoutCompat>
 
-    <androidx.appcompat.widget.LinearLayoutCompat
-        android:id="@+id/button_delete_history_record"
+    <!-- 菜单项超过一屏时转为滚动，底部选项不再被屏幕裁掉；maxHeight 在代码里按屏高设置 -->
+    <com.mytvb.ui.widget.NonFocusableScrollView
+        android:id="@+id/menu_scroll"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <androidx.appcompat.widget.LinearLayoutCompat
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+        <androidx.appcompat.widget.LinearLayoutCompat
+            android:id="@+id/button_delete_history_record"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="@dimen/px6"
@@ -464,5 +475,7 @@
                 android:textSize="@dimen/px18" />
         </androidx.appcompat.widget.LinearLayoutCompat>
     </androidx.appcompat.widget.LinearLayoutCompat>
+        </androidx.appcompat.widget.LinearLayoutCompat>
+    </com.mytvb.ui.widget.NonFocusableScrollView>
 
 </androidx.appcompat.widget.LinearLayoutCompat>

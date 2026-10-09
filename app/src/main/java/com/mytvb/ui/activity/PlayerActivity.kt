@@ -18,7 +18,6 @@ import android.view.KeyEvent
 import android.view.View
 import android.widget.FrameLayout
 import com.mytvb.feature.player.sponsor.SponsorProgressMarkerView
-import android.widget.TextClock
 import android.widget.TextView
 import android.widget.Toast
 import com.mytvb.core.common.ext.toast
@@ -258,9 +257,7 @@ class PlayerActivity : BaseActivity<FragmentVideoPlayerBinding>() {
 
     private lateinit var playerView: MyPlayerView
     private lateinit var bottomProgressBar: SponsorProgressMarkerView
-    private lateinit var textClock: TextClock
     private lateinit var textSubtitle: TextView
-    private lateinit var textDebug: TextView
     private lateinit var viewNext: View
     private lateinit var viewRelated: View
     private lateinit var recyclerViewRelated: RecyclerView
@@ -278,8 +275,6 @@ class PlayerActivity : BaseActivity<FragmentVideoPlayerBinding>() {
     private lateinit var quickActionExecutor: com.mytvb.feature.player.interaction.PlayerQuickActionExecutor
     private var playerKeyBindingHandler: com.mytvb.feature.keybinding.PlayerKeyBindingHandler? = null
 
-    private var latestErrorMessage: String? = null
-    private var latestLoadingState: Boolean = false
     private var latestVideoInfo: VideoDetailModel? = null
     private lateinit var playerSettings: PlayerSettings
     private var latestControllerVisibility: Int = View.GONE
@@ -371,7 +366,6 @@ class PlayerActivity : BaseActivity<FragmentVideoPlayerBinding>() {
         onPlaybackPositionChanged = { positionMs ->
             playerView.syncDanmakuPosition(positionMs)
             interactionView.onPositionUpdate(positionMs)
-            renderDebugState()
         },
         onPlaybackStalled = { positionMs, stalledMs ->
             recoverFromPlaybackStall(positionMs, stalledMs)
@@ -526,6 +520,9 @@ class PlayerActivity : BaseActivity<FragmentVideoPlayerBinding>() {
                 Player.STATE_ENDED -> {
                     viewModel.setLoading(false)
                     playerView.stopDanmaku()
+                    // 播完瞬间强制补发收尾心跳+直写历史（对齐 blbl），需覆盖下方提前 return 的路径。
+                    progressCoordinator.syncNow()
+                    viewModel.reportPlaybackHeartbeat(force = true)
                     // 公益广告锁死模式：播完唯一出口，先停播放器再退出，避免被 repeatMode/连播逻辑重新触发
                     if (psasLocked) {
                         player?.repeatMode = Player.REPEAT_MODE_OFF
@@ -747,11 +744,9 @@ class PlayerActivity : BaseActivity<FragmentVideoPlayerBinding>() {
         }
         bottomProgressBar = binding.bottomProgressBar
         slimTimelineRenderer = SlimTimelineRenderer(bottomProgressBar)
-        textClock = binding.textClock
         textSubtitle = binding.textSubtitle
         // 字幕有独立字号设置，不与 UI 文字缩放叠加
         ScaledTextView.exempt(textSubtitle)
-        textDebug = binding.textDebug
         viewNext = binding.viewNext
         viewRelated = binding.viewRelated
         recyclerViewRelated = binding.recyclerViewRelated
@@ -917,6 +912,7 @@ class PlayerActivity : BaseActivity<FragmentVideoPlayerBinding>() {
             playerView.showHideActionButton(false)
             playerView.showHideEpisodeButton(false)
             playerView.showHideRelatedButton(false)
+            playerView.showHideCommentButton(false)
             playerView.showHideDmSwitchButton(false)
             playerView.showHideLiveSettingButton(false)
             playerView.showHideSubtitleButton(false)
@@ -1016,6 +1012,7 @@ class PlayerActivity : BaseActivity<FragmentVideoPlayerBinding>() {
         playerView.showHideActionButton(false)
         playerView.showHideEpisodeButton(false)
         playerView.showHideRelatedButton(false)
+        playerView.showHideCommentButton(false)
         playerView.showHideDmSwitchButton(false)
         playerView.showHideLiveSettingButton(false)
         playerView.showHideSubtitleButton(false)
@@ -1067,6 +1064,7 @@ class PlayerActivity : BaseActivity<FragmentVideoPlayerBinding>() {
             override fun onRelated() { showRelatedPanel() }
             override fun onUpInfo() { showOwnerDetailDialog() }
             override fun onMore() { showPlayerActionDialog() }
+            override fun onComments() { showCommentPanel() }
             override fun onVideoInfo() { showVideoInfoDialog() }
             override fun onSubtitle() = showSubtitleSettings()
             override fun onRepeat() = toggleRepeatMode()
@@ -1404,20 +1402,11 @@ class PlayerActivity : BaseActivity<FragmentVideoPlayerBinding>() {
         }
 
         lifecycleScope.launch {
-            viewModel.isLoading.collect { loading ->
-                latestLoadingState = loading
-                renderDebugState()
-            }
-        }
-
-        lifecycleScope.launch {
             viewModel.error.collect { error ->
-                latestErrorMessage = error
                 if (!error.isNullOrBlank()) {
                     AppLog.e(TAG, "viewModel error: $error")
                 }
                 playerView.setCustomErrorMessage(error)
-                renderDebugState()
             }
         }
 
@@ -1683,7 +1672,7 @@ class PlayerActivity : BaseActivity<FragmentVideoPlayerBinding>() {
         progressCoordinator.syncNow()
         val (snapshotPositionMs, snapshotPlayWhenReady) = capturePlaybackSnapshot()
         postPlaybackProgressEvent(snapshotPositionMs)
-        viewModel.reportPlaybackHeartbeat()
+        viewModel.reportPlaybackHeartbeat(force = true)
         viewModel.savePlayerSnapshot()
         resumePlaybackWhenStarted = snapshotPlayWhenReady
         player?.pause()
@@ -1850,6 +1839,7 @@ class PlayerActivity : BaseActivity<FragmentVideoPlayerBinding>() {
     private fun updatePrimaryActionVisibility() {
         val (hasOwner, hasVideoIdentity) = PlayerScreenLogic.primaryActionFlags(latestVideoInfo?.view)
         playerView.setShowHideOwnerInfo(hasOwner)
+        playerView.showHideCommentButton(hasVideoIdentity)
         playerView.showHideActionButton(hasVideoIdentity)
         playerView.showSettingButton(hasVideoIdentity)
     }
@@ -1896,26 +1886,6 @@ class PlayerActivity : BaseActivity<FragmentVideoPlayerBinding>() {
     }
 
 
-    private fun renderDebugState() {
-        val text = PlayerScreenLogic.debugOverlayText(
-            context = this,
-            showDebugInfo = ::playerSettings.isInitialized && playerSettings.showDebugInfo,
-            errorMessage = latestErrorMessage,
-            player = player,
-            loadingText = getString(R.string.loading)
-        )
-        if (text == null) {
-            textDebug.isVisible = false
-            textDebug.text = ""
-        } else {
-            textDebug.isVisible = true
-            textDebug.text = text
-        }
-    }
-
-    private fun buildDebugInfo(p: ExoPlayer): String {
-        return PlayerScreenLogic.buildDebugInfo(this, p)
-    }
     private fun syncPlaybackEnvironment() {
         if (suppressPlaybackEnvironmentSync) {
             return
@@ -1953,10 +1923,6 @@ class PlayerActivity : BaseActivity<FragmentVideoPlayerBinding>() {
             }
         }
         renderBottomProgressBar()
-        textClock.visibility = when (uiCoordinator.hudState) {
-            PlaybackUiCoordinator.HudState.Chrome -> View.VISIBLE
-            else -> View.GONE
-        }
     }
 
     private fun renderBottomProgressBar() {
@@ -2086,6 +2052,7 @@ class PlayerActivity : BaseActivity<FragmentVideoPlayerBinding>() {
     private fun showRelatedPanel() { overlayUiController.showRelatedPanel() }
     private fun showOwnerDetailDialog() { overlayUiController.showOwnerDetailDialog() }
     private fun showPlayerActionDialog() { overlayUiController.showPlayerActionDialog() }
+    private fun showCommentPanel() { overlayUiController.showCommentPanel() }
     private fun showVideoInfoDialog() { overlayUiController.showVideoInfoDialog() }
 
     private fun applyPlayerSettings(settings: PlayerSettings) {
@@ -2101,7 +2068,6 @@ class PlayerActivity : BaseActivity<FragmentVideoPlayerBinding>() {
         textSubtitle.setTextSize(TypedValue.COMPLEX_UNIT_PX, settings.subtitleTextSizePx.toFloat())
         playerView.setAfterPlayMode(settings.afterPlayMode)
         playerView.setupDanmakuEngine()
-        renderDebugState()
         updateEpisodeNavigationVisibility()
         updateDanmakuSwitchVisibility()
         updatePlaySpeedButtonVisibility()

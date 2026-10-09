@@ -30,6 +30,8 @@ class VideoAdapter(
     private val onItemClick: (VideoModel) -> Unit = {},
     onTopEdgeUp: (() -> Boolean)? = null,
     onBottomEdgeDown: (() -> Boolean)? = null,
+    onLeftEdge: (() -> Boolean)? = null,
+    onRightEdge: (() -> Boolean)? = null,
     onItemFocused: ((Int) -> Unit)? = null,
     onItemFocusedWithView: ((View, Int) -> Unit)? = null,
     onItemDpad: ((View, Int, KeyEvent) -> Boolean)? = null,
@@ -57,6 +59,8 @@ class VideoAdapter(
     init {
         this.onTopEdgeUp = onTopEdgeUp
         this.onBottomEdgeDown = onBottomEdgeDown
+        this.onLeftEdge = onLeftEdge
+        this.onRightEdge = onRightEdge
         this.onItemFocused = onItemFocused
         this.onItemFocusedWithView = onItemFocusedWithView
         this.onItemDpad = onItemDpad
@@ -143,6 +147,8 @@ class VideoAdapter(
             clickLambda,
             onTopEdgeUp,
             onBottomEdgeDown,
+            onLeftEdge,
+            onRightEdge,
             { view, position, hasFocus ->
                 if (hasFocus) {
                     onItemFocused?.invoke(position)
@@ -180,6 +186,8 @@ class VideoAdapter(
         private val onItemClick: (View, VideoModel) -> Unit,
         onTopEdgeUp: (() -> Boolean)?,
         onBottomEdgeDown: (() -> Boolean)?,
+        onLeftEdge: (() -> Boolean)? = null,
+        onRightEdge: (() -> Boolean)? = null,
         onFocusChange: ((View, Int, Boolean) -> Unit)? = null,
         private val onItemInteracted: ((View, Int) -> Unit)? = null,
         private val onItemDisliked: ((VideoModel) -> Unit)? = null,
@@ -280,6 +288,8 @@ class VideoAdapter(
                 view = views.root,
                 onTopEdgeUp = onTopEdgeUp,
                 onBottomEdgeDown = onBottomEdgeDown,
+                onLeftEdge = onLeftEdge,
+                onRightEdge = onRightEdge,
                 handleListDpadDown = false,
                 chainedListener = keyListener
             )
@@ -358,7 +368,7 @@ class VideoAdapter(
                 views.progressBar.visibility = View.VISIBLE
                 views.progressBar.max = duration.toInt()
                 views.progressBar.progress = progress.coerceAtMost(duration).toInt()
-                durationText = if (duration > 3 && progress >= duration - 3) {
+                durationText = if (isWatchedComplete(progress, duration)) {
                     views.root.context.getString(R.string.adapter_watched_complete)
                 } else {
                     views.root.context.getString(
@@ -462,7 +472,9 @@ class VideoAdapter(
         }
 
         private fun isWatchedComplete(progress: Long, duration: Long): Boolean {
-            return duration > 3L && progress >= duration - 3L
+            // 对齐官方"播满才算看完"：progress 到达 duration 才显示已看完，
+            // 提前 3 秒标记会与官方历史记录（还差 1 秒时官方显示未看完）不一致
+            return duration > 3L && progress >= duration
         }
 
         private fun setTitleColor(color: Int) {

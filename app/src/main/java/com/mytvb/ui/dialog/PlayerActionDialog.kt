@@ -29,6 +29,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
+import com.mytvb.core.ui.base.DialogWindowFit
 
 class PlayerActionDialog(
     context: Context,
@@ -55,6 +56,10 @@ class PlayerActionDialog(
         supportRequestWindowFeature(Window.FEATURE_NO_TITLE)
         setContentView(binding.root)
         setCanceledOnTouchOutside(true)
+        DialogWindowFit.apply(
+            window, context,
+            context.resources.getDimensionPixelSize(R.dimen.px1000)
+        )
         binding.root.setOnClickListener { dismiss() }
         initListeners()
         renderState()
@@ -402,6 +407,11 @@ class PlayerActionDialog(
             }
         }
         dialog.show()
+        DialogWindowFit.apply(
+            dialog.window, context,
+            context.resources.getDimensionPixelSize(R.dimen.px800),
+            context.resources.getDimensionPixelSize(R.dimen.px615)
+        )
     }
 
     private fun loadCoinMultiply(): Int {

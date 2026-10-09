@@ -87,7 +87,7 @@
     <string name="quality_hdr">HDR</string>
     <string name="quality_4k">4K Ultra HD</string>
     <string name="quality_1080p_60">1080P 60fps</string>
-    <string name="quality_1080p_plus">1080P+ High bitrate</string>
+    <string name="quality_1080p_plus">1080P High bitrate</string>
     <string name="quality_1080p">1080P HD</string>
     <string name="quality_720p_60">720P 60fps</string>
     <string name="quality_720p">720P HD</string>

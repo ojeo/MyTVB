@@ -19,12 +19,17 @@ class UsageTipDialog(context: Context) : AppCompatDialog(context, R.style.Dialog
     init {
         supportRequestWindowFeature(Window.FEATURE_NO_TITLE)
         setContentView(binding.root)
-        setCancelable(false)
+        // 返回键允许直接关闭：否则倒计时期间遥控器/触屏没有任何退出途径，
+        // 用户只能强杀应用（usage_tip_shown 已落盘，关闭后不再弹出）。
+        setCancelable(true)
         setCanceledOnTouchOutside(false)
         window?.setLayout(
             (context.resources.displayMetrics.widthPixels * 0.6).toInt(),
             WindowManager.LayoutParams.WRAP_CONTENT
         )
+        // 内容在小屏/大字号下可能高过屏幕，限制滚动区高度避免按钮被推出屏幕
+        binding.textScroll.maxHeight =
+            (context.resources.displayMetrics.heightPixels * 0.65f).toInt()
 
         binding.buttonConfirm.setTextColor(Color.GRAY)
         binding.buttonConfirm.isClickable = false

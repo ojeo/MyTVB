@@ -31,6 +31,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
+import com.mytvb.core.ui.base.DialogWindowFit
 
 class VideoCardMenuDialog(
     context: Context,
@@ -79,6 +80,10 @@ class VideoCardMenuDialog(
         setContentView(binding.root)
         val screenWidth = context.resources.displayMetrics.widthPixels
         window?.setLayout((screenWidth * 0.45).toInt(), android.view.ViewGroup.LayoutParams.WRAP_CONTENT)
+        // 菜单项较多（历史删除/稍后再看/详情/UP主页/收藏/两个不感兴趣）时整体会高过屏幕，
+        // 底部选项被裁；限制菜单区最高 80% 屏高，超出转为滚动
+        binding.menuScroll.maxHeight =
+            (context.resources.displayMetrics.heightPixels * 0.8f).toInt()
         setCanceledOnTouchOutside(true)
         configureContent()
         initListeners()
@@ -508,6 +513,11 @@ class VideoCardMenuDialog(
             }
         }
         dialog.show()
+        DialogWindowFit.apply(
+            dialog.window, context,
+            context.resources.getDimensionPixelSize(R.dimen.px800),
+            context.resources.getDimensionPixelSize(R.dimen.px615)
+        )
     }
 
     private fun refreshFavoriteState() {

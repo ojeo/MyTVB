@@ -5,7 +5,7 @@
     android:clipChildren="false"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:elevation="1dp">
+    android:elevation="@dimen/px2">
     <androidx.constraintlayout.widget.ConstraintLayout
         android:gravity="center"
         android:layout_gravity="center"
@@ -13,8 +13,8 @@
         android:clipChildren="false"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:translationZ="3dp"
-        android:elevation="3dp">
+        android:translationZ="@dimen/px7"
+        android:elevation="@dimen/px7">
         <TextView
             android:textSize="@dimen/px38"
             android:textStyle="bold"
@@ -131,5 +131,5 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:text="ABC"
-        android:elevation="1dp"/>
+        android:elevation="@dimen/px2"/>
 </FrameLayout>

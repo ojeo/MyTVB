@@ -66,6 +66,18 @@ private fun settingLabelRes(stored: String): Int = when (stored) {
     "Hi-Res无损" -> R.string.setting_audio_hi_res
     "杜比视界" -> R.string.setting_quality_dolby_vision
     "智能修复" -> R.string.setting_quality_ai_restore
+    // 画质档位存储值即 B 站官方名，显示名走模型层 nameRes 与播放器菜单保持同一套叫法
+    "8K 超高清" -> R.string.quality_8k
+    "HDR 真彩" -> R.string.quality_hdr
+    "4K 超高清" -> R.string.quality_4k
+    "1080P 60帧" -> R.string.quality_1080p_60
+    "1080P 高码率" -> R.string.quality_1080p_plus
+    "1080P 高清" -> R.string.quality_1080p
+    "720P 60帧" -> R.string.quality_720p_60
+    "720P 准高清" -> R.string.quality_720p
+    "480P 标清" -> R.string.quality_480p
+    "360P 流畅" -> R.string.quality_360p
+    "240P 极速" -> R.string.quality_240p
     // 画质完整显示名走 VideoQuality/AudioQuality.displayName(context)（模型层 nameRes）
     else -> 0
 }

@@ -3,12 +3,12 @@
     android:background="@android:color/transparent"
     android:clickable="true"
     android:focusable="true"
-    android:layout_width="@dimen/px620"
+    android:layout_width="match_parent"
     android:layout_height="wrap_content">
     <!-- 卡片背景：顶边压在头像中线（官网同款悬浮头像），高度锚定按钮行下方留白，内容自适应 -->
     <View
         android:background="@drawable/bg_user_dialog_card"
-        android:layout_width="@dimen/px620"
+        android:layout_width="0dp"
         android:layout_height="0dp"
         android:layout_marginTop="@dimen/px100"
         app:layout_constraintBottom_toBottomOf="@+id/space_card_bottom"
@@ -68,18 +68,11 @@
             android:text="@string/dialog_normal_member"
             android:textSize="@dimen/px20"
             android:textStyle="bold" />
-        <androidx.appcompat.widget.AppCompatTextView
+        <com.mytvb.core.ui.user.UserLevelBadgeView
             android:id="@+id/text_level"
             android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="@dimen/px10"
-            android:background="@color/red"
-            android:paddingStart="@dimen/px15"
-            android:paddingEnd="@dimen/px15"
-            android:text="@string/level_"
-            android:textColor="@color/textColor"
-            android:textSize="@dimen/px25"
-            android:textStyle="bold" />
+            android:layout_height="@dimen/px30"
+            android:layout_marginStart="@dimen/px10" />
     </androidx.appcompat.widget.LinearLayoutCompat>
     <androidx.appcompat.widget.AppCompatTextView
         android:id="@+id/text_coin"

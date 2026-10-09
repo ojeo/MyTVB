@@ -133,22 +133,6 @@ class LivePlayerFragment : Fragment() {
         arguments?.let { args ->
             roomId = args.getLong(ARG_ROOM_ID, -1L)
         }
-        val textClock = binding.textClock
-        textClock.alpha = 0f
-        textClock.translationY = -textClock.height.toFloat().coerceAtLeast(200f)
-        binding.playerView.setControllerVisibilityListener(object : com.mytvb.feature.player.view.MyPlayerView.ControllerVisibilityListener {
-            override fun onVisibilityChanged(visibility: Int) {
-                val animate = textClock.animate().setDuration(250L)
-                when (visibility) {
-                    View.VISIBLE -> animate.translationY(0f).alpha(1f).setListener(null)
-                    View.INVISIBLE -> animate.translationY(-textClock.height.toFloat()).alpha(0f).setListener(null)
-                    View.GONE -> {
-                        textClock.translationY = -textClock.height.toFloat()
-                        textClock.alpha = 0f
-                    }
-                }
-            }
-        })
         setupPlayer()
         setupObservers()
         if (roomId > 0) {
@@ -198,6 +182,7 @@ class LivePlayerFragment : Fragment() {
         binding.playerView.showHideEpisodeButton(false)
         binding.playerView.showHideActionButton(false)
         binding.playerView.showHideRelatedButton(false)
+        binding.playerView.showHideCommentButton(false)
         binding.playerView.showHideRepeatButton(false)
         binding.playerView.showHideSubtitleButton(false)
         binding.playerView.showHideDmSwitchButton(true)

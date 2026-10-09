@@ -146,6 +146,8 @@ class VideoCoverMetaOverlayView @JvmOverloads constructor(
         textSize = metrics.badgeTextSize
     }
     private val badgeRect = RectF()
+    private val iconDstRect = RectF()
+    private val iconScalePaint = Paint(Paint.FILTER_BITMAP_FLAG)
 
     private var playCountText: CharSequence = ""
     private var danmakuText: CharSequence = ""
@@ -158,8 +160,17 @@ class VideoCoverMetaOverlayView @JvmOverloads constructor(
     private var progressValue = 0
     private var showProgress = false
 
+    /**
+     * 角标行整体等比系数：界面缩放大档下列数粒度有限（卡宽×1.25 撑不起文字×1.5），
+     * 需求宽超卡宽时整行（字号/图标/间距）等比缩到恰好放下，信息完整不叠压；
+     * 100% 时恒为 1，走原始路径与历史视觉逐像素一致。
+     */
+    private var badgeFitScale = 1f
+    private var badgeFitDirty = true
+
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
+        badgeFitDirty = true
         val top = (h - metrics.coverGradientHeight).coerceAtLeast(0).toFloat()
         gradientPaint.shader = LinearGradient(
             0f,
@@ -209,6 +220,7 @@ class VideoCoverMetaOverlayView @JvmOverloads constructor(
         this.showDanmakuCount = showDanmakuCount
         this.showInteractionBadge = showInteractionBadge
         this.showChargeBadge = showChargeBadge
+        badgeFitDirty = true
         invalidate()
     }
 
@@ -229,41 +241,95 @@ class VideoCoverMetaOverlayView @JvmOverloads constructor(
         canvas.restoreToCount(saveCount)
     }
 
-    private fun drawMetaLine(canvas: Canvas) {
-        var x = metrics.coverMetaStart.toFloat()
-        val centerY = height - metrics.coverMetaBottom - metrics.metaIconSize / 2f
-        val iconTop = centerY - metrics.metaIconSize / 2f
+    /** 按当前文本内容与卡宽计算整行等比系数；内容或尺寸变化时重算。 */
+    private fun ensureBadgeFitScale() {
+        if (!badgeFitDirty || width <= 0) return
+        var contentWidth = 0f
         if (showPlayCount && playCountText.isNotBlank()) {
-            canvas.drawBitmap(assets.playCountIcon, x, iconTop, null)
-            x += metrics.metaIconSize + metrics.metaTextStart
-            x = drawMetaText(canvas, playCountText, x, centerY) + metrics.metaGroupGap
+            contentWidth += metrics.metaIconSize + metrics.metaTextStart +
+                metaPaint.measureText(playCountText.toString()) + metrics.metaGroupGap
         }
         if (showDanmakuCount && danmakuText.isNotBlank()) {
-            canvas.drawBitmap(assets.danmakuIcon, x, iconTop, null)
-            x += metrics.metaIconSize + metrics.metaTextStart
+            contentWidth += metrics.metaIconSize + metrics.metaTextStart +
+                metaPaint.measureText(danmakuText.toString())
+        }
+        if (durationText.isNotBlank()) {
+            contentWidth += metrics.px10 + metaPaint.measureText(durationText.toString()) + metrics.px8 * 2
+        }
+        val need = metrics.coverMetaStart + contentWidth + metrics.durationEnd
+        // 边距与组间安全距不参与缩放（缩了会显得挤），只缩内容（字号/图标/组内距）
+        val fixed = metrics.coverMetaStart + metrics.durationEnd + metrics.px10
+        val contentOnly = (contentWidth - metrics.px10).coerceAtLeast(1f)
+        badgeFitScale = if (need > width && need > 0f) {
+            ((width - fixed) / contentOnly).coerceIn(0.5f, 1f)
+        } else {
+            1f
+        }
+        badgeFitDirty = false
+    }
+
+    private fun drawIconScaled(canvas: Canvas, icon: Bitmap, left: Float, top: Float, size: Float) {
+        if (badgeFitScale == 1f) {
+            canvas.drawBitmap(icon, left, top, null)
+        } else {
+            iconDstRect.set(left, top, left + size, top + size)
+            canvas.drawBitmap(icon, null, iconDstRect, iconScalePaint)
+        }
+    }
+
+    private fun drawMetaLine(canvas: Canvas) {
+        ensureBadgeFitScale()
+        val savedTextSize = metaPaint.textSize
+        if (badgeFitScale != 1f) {
+            metaPaint.textSize = savedTextSize * badgeFitScale
+        }
+        val iconSize = metrics.metaIconSize * badgeFitScale
+        // 行中心线：底部边距上方半个行高（行高以图标计），图标/文字/时长统一居中到这条线
+        val centerY = height - metrics.coverMetaBottom - iconSize / 2f
+        val iconTop = centerY - iconSize / 2f
+        var x = metrics.coverMetaStart.toFloat()
+        if (showPlayCount && playCountText.isNotBlank()) {
+            drawIconScaled(canvas, assets.playCountIcon, x, iconTop, iconSize)
+            x += iconSize + metrics.metaTextStart * badgeFitScale
+            x = drawMetaText(canvas, playCountText, x, centerY) + metrics.metaGroupGap * badgeFitScale
+        }
+        if (showDanmakuCount && danmakuText.isNotBlank()) {
+            drawIconScaled(canvas, assets.danmakuIcon, x, iconTop, iconSize)
+            x += iconSize + metrics.metaTextStart * badgeFitScale
             drawMetaText(canvas, danmakuText, x, centerY)
+        }
+        if (badgeFitScale != 1f) {
+            metaPaint.textSize = savedTextSize
         }
     }
 
     private fun drawMetaText(canvas: Canvas, text: CharSequence, x: Float, centerY: Float): Float {
         val fm = metaPaint.fontMetrics
-        val textHeight = ceil((fm.bottom - fm.top).toDouble()).toFloat() + metrics.px3
-        val baseline = centerY - textHeight / 2f + metrics.px3 - fm.top
+        val baseline = centerY - (fm.top + fm.bottom) / 2f
         canvas.drawText(text.toString(), x, baseline, metaPaint)
         return x + metaPaint.measureText(text.toString())
     }
 
     private fun drawDuration(canvas: Canvas) {
         if (durationText.isBlank()) return
+        ensureBadgeFitScale()
+        val savedTextSize = metaPaint.textSize
+        if (badgeFitScale != 1f) {
+            metaPaint.textSize = savedTextSize * badgeFitScale
+        }
         val text = durationText.toString()
         val fm = metaPaint.fontMetrics
-        val textHeight = ceil((fm.bottom - fm.top).toDouble()).toFloat() + metrics.px4 * 2
         val textWidth = metaPaint.measureText(text)
-        val boxWidth = textWidth + metrics.px8 * 2
+        val boxWidth = textWidth + metrics.px8 * 2 * badgeFitScale
         val left = width - metrics.durationEnd - boxWidth
-        val top = height - metrics.durationBottom - textHeight
-        val baseline = top + metrics.px4 - fm.top
-        canvas.drawText(text, left + metrics.px8, baseline, metaPaint)
+        // 与左侧角标组共用同一行中心线（按图标半高定位），保证三组上下对齐
+        val iconSize = metrics.metaIconSize * badgeFitScale
+        val centerY = height - metrics.coverMetaBottom - iconSize / 2f
+        val baseline = centerY - (fm.top + fm.bottom) / 2f
+        canvas.drawText(text, left + metrics.px8 * badgeFitScale, baseline, metaPaint)
+        if (badgeFitScale != 1f) {
+            metaPaint.textSize = savedTextSize
+        }
     }
 
     private fun drawBadges(canvas: Canvas) {
@@ -942,6 +1008,7 @@ private class LightCardMetrics private constructor(context: Context) {
     val titleIconFallbackSize = dimen(context, R.dimen.px31)
     // 卡片是自绘文字，跟随全局 UI 文字缩放（onMeasure 由字号推导高度，自动跟随）
     val scaleSnapshot = UiTextScale.scale()
+    val densitySnapshot = context.resources.displayMetrics.density
     val titleTextSize = dimenF(context, R.dimen.px31) * scaleSnapshot
     val ownerTextSize = dimenF(context, R.dimen.px22) * UiTextScale.scale()
     val metaTextSize = dimenF(context, R.dimen.px22) * UiTextScale.scale()
@@ -964,9 +1031,11 @@ private class LightCardMetrics private constructor(context: Context) {
         fun get(context: Context): LightCardMetrics {
             val resources = context.resources
             val scale = UiTextScale.scale()
+            val density = resources.displayMetrics.density
             synchronized(cache) {
-                // Resources 实例在 Activity recreate 后可能复用，档位变化时按快照失效重建
-                cache[resources]?.takeIf { it.scaleSnapshot == scale } ?: cache.remove(resources)
+                // Resources 实例在 Activity recreate 后可能复用，档位/密度变化时按快照失效重建
+                cache[resources]?.takeIf { it.scaleSnapshot == scale && it.densitySnapshot == density }
+                    ?: cache.remove(resources)
                 return cache.getOrPut(resources) { LightCardMetrics(context.applicationContext ?: context) }
             }
         }

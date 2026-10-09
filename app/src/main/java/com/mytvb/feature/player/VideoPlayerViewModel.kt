@@ -42,6 +42,7 @@ import com.mytvb.network.session.NetworkSessionGateway
 import com.mytvb.network.response.Base2Response
 import com.mytvb.core.common.log.AppLog
 import com.mytvb.core.common.settings.AppSettingsDataStore
+import com.mytvb.core.ui.base.AppToast
 import com.mytvb.feature.player.cache.PlayerMediaCache
 import com.mytvb.network.cookie.CookieManager
 import com.mytvb.repository.UserRepository
@@ -549,6 +550,8 @@ class VideoPlayerViewModel(
     private var currentCid: Long = 0L
     private var currentSeasonId: Long? = null
     private var currentEpId: Long? = null
+    /** PGC 剧集类型（1番剧 2电影 3纪录片 4国创 5电视剧 6综艺），PGC 详情加载后回填，心跳 sub_type 用。 */
+    private var currentSeasonType: Int = 0
     private var currentPlayInfo: PlayInfoModel? = null
     private var currentGraphVersion: Long = 0L
 
@@ -581,6 +584,9 @@ class VideoPlayerViewModel(
         override val qualityId: Int
             get() = (_selectedQuality.value?.id ?: selectedQualityId ?: currentPlayInfo?.quality ?: 0)
                 .takeIf { it > 0 } ?: 80
+        override val currentSeasonId: Long? get() = this@VideoPlayerViewModel.currentSeasonId
+        override val currentEpId: Long? get() = this@VideoPlayerViewModel.currentEpId
+        override val currentSeasonType: Int get() = this@VideoPlayerViewModel.currentSeasonType
     }
 
     private val danmakuController = DanmakuPlaybackController(
@@ -888,6 +894,7 @@ class VideoPlayerViewModel(
         currentCid = cid
         currentSeasonId = seasonId.takeIf { it > 0L }
         currentEpId = epId.takeIf { it > 0L }
+        currentSeasonType = 0
         pendingSeekPositionMs = seekPositionMs.coerceAtLeast(0L)
         pendingPlayWhenReady = true
         launchStartEpisodeIndex = startEpisodeIndex
@@ -1010,7 +1017,7 @@ class VideoPlayerViewModel(
 
     fun playEpisode(index: Int, preferLastPlayTime: Boolean = true) {
         val episode = _episodes.value.getOrNull(index) ?: return
-        reportPlaybackHeartbeat()
+        reportPlaybackHeartbeat(force = true)
         savePlayerSnapshot()
         val targetBvid = episode.bvid.takeIf { it.isNotBlank() }
         val targetSeasonId = episode.seasonId.takeIf { it > 0L }
@@ -1089,7 +1096,7 @@ class VideoPlayerViewModel(
             _error.value = appContext.getString(R.string.player_error_related_missing_id)
             return
         }
-        reportPlaybackHeartbeat()
+        reportPlaybackHeartbeat(force = true)
         val targetIdentity = PlayRequestIdentity(
             aid = targetAid,
             bvid = targetBvid?.takeIf { it.isNotBlank() },
@@ -1111,13 +1118,14 @@ class VideoPlayerViewModel(
     fun playInteractionChoice(cid: Long, edgeId: Long) {
         if (cid <= 0L) return
         AppLog.d(TAG, "playInteractionChoice: cid=$cid, edgeId=$edgeId")
-        reportPlaybackHeartbeat()
+        reportPlaybackHeartbeat(force = true)
         currentCid = cid
         pendingSeekPositionMs = 0L
         pendingPlayWhenReady = true
         didApplyLastPlayPosition = false
         currentSeasonId = null
         currentEpId = null
+        currentSeasonType = 0
         subtitleController.resetSession()
         danmakuController.markDmMaskIdle()
         // 切剧情节点换 cid：旧节点空降片段按新节点时间轴会误触发跳过，须重置后按新 cid 重新准备。
@@ -1145,6 +1153,7 @@ class VideoPlayerViewModel(
         requestedQualityId = quality.id
         _selectedQuality.value = quality
         savePlayerSnapshot()
+        warnHdrUnsupportedIfNecessary(quality.id)
         // 无缝切换：当前挂的是多清晰度 DASH MPD 且目标档在同编码下可用时，
         // 只改 TrackSelection 目标并丢弃旧档缓冲，不重建 MediaSource、不黑屏不重seek。
         val catalog = currentSeamlessCatalog
@@ -1162,6 +1171,23 @@ class VideoPlayerViewModel(
         }
         capturePlaybackSnapshot(currentPositionMs, playWhenReady)
         loadPlayUrl(preferLastPlayTime = false, replaceInPlace = true)
+    }
+
+    /**
+     * HDR/杜比档位选择前的能力提示：解码器与显示 HDR 能力任一缺失时告知用户，
+     * 避免选了杜比视界/HDR 后静默降级或播放失败被误认为「激活不了」。不阻断切换。
+     */
+    private fun warnHdrUnsupportedIfNecessary(qualityId: Int) {
+        val unsupportedNameRes = when (qualityId) {
+            126 -> if (VideoCodecSupport.isDolbyVisionSupported(appContext)) 0 else R.string.setting_quality_dolby_vision
+            125, 129 -> if (VideoCodecSupport.isHdrSupported(appContext)) 0 else R.string.quality_hdr
+            else -> 0
+        }
+        if (unsupportedNameRes != 0) {
+            val name = appContext.getString(unsupportedNameRes)
+            AppToast.show(appContext, appContext.getString(R.string.player_hdr_unsupported_hint, name))
+            AppLog.w(TAG, "hdr capability check failed: qn=$qualityId, may fail or fall back")
+        }
     }
 
     /**
@@ -1350,7 +1376,7 @@ class VideoPlayerViewModel(
             return
         }
 
-        reportPlaybackHeartbeat()
+        reportPlaybackHeartbeat(force = true)
         savePlayerSnapshot()
         loadVideoInfo(
             aid = identity.aid,
@@ -1508,7 +1534,7 @@ class VideoPlayerViewModel(
         }
     }
 
-    fun reportPlaybackHeartbeat(playType: Int = 0) {
+    fun reportPlaybackHeartbeat(playType: Int = 0, force: Boolean = false) {
         // 进度归属校验：VM 会话身份与 player 实际挂载源不一致（复用实例换源窗口、
         // 切集瞬间）时，position 属于别的视频，上报会把假进度写进服务端观看历史，
         // 之后这个视频在任何端都会带着错误进度续播。
@@ -1519,7 +1545,7 @@ class VideoPlayerViewModel(
             )
             return
         }
-        heartbeatReporter.reportPlaybackHeartbeat(playType)
+        heartbeatReporter.reportPlaybackHeartbeat(playType, force)
     }
 
     private fun rebuildPlayback() {
@@ -1717,6 +1743,7 @@ class VideoPlayerViewModel(
             if (shouldFallbackToUgcPlayback(detailResponse)) {
                 currentSeasonId = null
                 currentEpId = null
+                currentSeasonType = 0
                 loadUgcVideoInfo(preferLastPlayTime = preferLastPlayTime, loadGeneration = loadGeneration)
                 return@coroutineScope
             }
@@ -1748,6 +1775,7 @@ class VideoPlayerViewModel(
 
         currentSeasonId = resolvedSeasonId
         currentEpId = selectedEpisode?.epId ?: epId
+        currentSeasonType = mergedDetail.type
         currentCid = selectedEpisode?.cid ?: currentCid
         currentAid = selectedEpisode?.aid?.takeIf { it > 0L } ?: currentAid
         currentBvid = selectedEpisode?.bvid?.takeIf { it.isNotBlank() } ?: currentBvid
@@ -2092,18 +2120,33 @@ class VideoPlayerViewModel(
         val episodeItems = episodeCatalogBuilder.buildUgcEpisodes(detail)
         _episodes.value = episodeItems
 
-        // 分P 选择：优先按 cid 精确匹配。
-        // 注意：不能加 bvid 匹配作为 fallback——多P视频所有分P共用同一个 bvid，
+        // 分P/合集 选择：优先按 cid 精确匹配；cid 未指定（搜索/收藏夹等稿件级入口）时，
+        // 先按 bvid/aid 把「点击的那个稿件」定位进合集目录——合集场景点谁播谁。
+        // 否则 cid=0 一律落到 index 0（合集第一集），用户点合集内任意视频都播同一集。
+        // 注意：cid>0 时不加 bvid 匹配兜底——多P视频所有分P共用同一个 bvid，
         // 会导致 indexOfFirst 永远命中第一个分P，覆盖掉调用方传入的目标 cid（公益广告场景踩到）。
+        val targetBvid = currentBvid?.takeIf { it.isNotBlank() }
+        val targetAid = currentAid?.takeIf { it > 0L }
+        fun matchesClickedArchive(episode: PlayableEpisode): Boolean =
+            (targetBvid != null && episode.bvid == targetBvid) ||
+                (targetAid != null && episode.aid == targetAid)
         var selectedIndex = if (currentCid > 0L) {
             episodeItems.indexOfFirst { it.cid == currentCid }.takeIf { it >= 0 } ?: 0
         } else {
-            0
+            episodeItems.indexOfFirst(::matchesClickedArchive).takeIf { it >= 0 } ?: 0
         }
 
         // ── 续播定位：当前未指定 cid（如收藏夹入口）时，先查历史记录接口定位最后播放分P，
-        // 未命中再降级为遍历探测（用所有分P cid 并发请求 playurl，取 last_play_time 最大的分P）。
+        // 未命中再降级为遍历探测（用分P cid 并发请求 playurl，取 last_play_time 最大的分P）。
         // 历史接口一次请求即可拿全「最后观看分P + 进度」，优于遍历探测的 O(N) 次 playurl 请求。
+        // 探测范围限定在「点击稿件」自己的分P内：合集目录跨稿件探测会把点击目标换成合集里
+        // 其他稿件（点 B 播 X），且点击稿件的 aid 配其他稿件 cid 属错配请求——
+        // 几十集的合集等于长时间黑屏逐集发 playurl，还容易触发风控。
+        val probeScopeIndices = if (targetBvid != null || targetAid != null) {
+            episodeItems.indices.filter { index -> matchesClickedArchive(episodeItems[index]) }
+        } else {
+            episodeItems.indices.toList()
+        }
         if (currentCid <= 0L && episodeItems.size > 1) {
             val historyResume = resolveResumeFromHistory(episodeItems)
             if (historyResume != null) {
@@ -2117,8 +2160,8 @@ class VideoPlayerViewModel(
                 if (historyProgressMs > 0L) {
                     pendingSeekPositionMs = historyProgressMs
                 }
-            } else {
-                val probeResult = probeLastPlayEpisode(episodeItems)
+            } else if (probeScopeIndices.size > 1) {
+                val probeResult = probeLastPlayEpisode(episodeItems, probeScopeIndices)
                 if (probeResult != null) {
                     val (probeIndex, probeTime) = probeResult
                     AppLog.i(TAG, "probe_resume found: index=$probeIndex cid=${episodeItems[probeIndex].cid} lastPlayTime=${probeTime}ms")
@@ -2126,8 +2169,17 @@ class VideoPlayerViewModel(
                 } else {
                     AppLog.i(TAG, "probe_resume not_found: no episode has last_play_time > 5000ms")
                 }
+            } else {
+                AppLog.i(TAG, "probe_resume skipped: clicked archive has single page, scope=${probeScopeIndices.size}")
             }
         }
+        AppLog.i(
+            TAG,
+            "episode_select: requestCid=$currentCid requestBvid=$targetBvid requestAid=$targetAid -> " +
+                "index=$selectedIndex picked(cid=${episodeItems.getOrNull(selectedIndex)?.cid} " +
+                "bvid=${episodeItems.getOrNull(selectedIndex)?.bvid} aid=${episodeItems.getOrNull(selectedIndex)?.aid}) " +
+                "items=${episodeItems.size} probeScope=${probeScopeIndices.size}"
+        )
         _selectedEpisodeIndex.value = selectedIndex
         val selectedEpisode = episodeItems.getOrNull(selectedIndex)
         currentCid = selectedEpisode?.cid
@@ -2282,16 +2334,22 @@ class VideoPlayerViewModel(
      * 策略：从第0P开始，每批并发 5 个请求，批次内从后往前取最后一个 last_play_time > 5000ms 的分P。
      * 命中即停止，未命中继续下一批。最坏情况扫描全量。
      *
+     * 探测请求用每个分集自己的 aid/bvid 配 cid：合集目录里每个分集是独立稿件，
+     * 用入口稿件的 aid 配其他分集的 cid 属错配请求（结果失真或直接失败）。
+     *
+     * @param scopeIndices 允许探测的分P索引（限定在点击稿件自己的分P范围内），null 表示全量
      * @return Pair<分P索引, last_play_time毫秒>，若所有分P均无播放记录则返回 null。
      */
     private suspend fun probeLastPlayEpisode(
-        episodes: List<PlayableEpisode>
+        episodes: List<PlayableEpisode>,
+        scopeIndices: List<Int>? = null
     ): Pair<Int, Long>? = coroutineScope {
-        if (episodes.isEmpty()) return@coroutineScope null
+        val probeIndices = scopeIndices ?: episodes.indices.toList()
+        if (probeIndices.isEmpty()) return@coroutineScope null
 
-        val aid = currentAid
-        val bvid = currentBvid?.takeIf { it.isNotBlank() }
-        if ((aid == null || aid <= 0L) && bvid.isNullOrBlank()) return@coroutineScope null
+        val entryAid = currentAid
+        val entryBvid = currentBvid?.takeIf { it.isNotBlank() }
+        if ((entryAid == null || entryAid <= 0L) && entryBvid.isNullOrBlank()) return@coroutineScope null
 
         val qualityId = requestedQualityId ?: selectedQualityId ?: 80
         val fnval = 16
@@ -2302,21 +2360,23 @@ class VideoPlayerViewModel(
         suspend fun queryEpisode(index: Int): Pair<Int, Long> {
             val ep = episodes[index]
             val result = playInfoGateway.requestPlayInfo(
-                aid = aid, bvid = bvid, cid = ep.cid,
+                aid = ep.aid.takeIf { it > 0L } ?: entryAid,
+                bvid = ep.bvid.takeIf { it.isNotBlank() } ?: entryBvid,
+                cid = ep.cid,
                 epId = null, qualityId = qualityId,
                 fnval = fnval, fourk = fourk,
                 allowWbi = true, seasonId = 0L
             )
             val lastPlayTime = result?.data?.lastPlayTime ?: 0L
-            AppLog.d(TAG, "probe_resume episode[$index] cid=${ep.cid} lastPlayTime=${lastPlayTime}ms")
+            AppLog.d(TAG, "probe_resume episode[$index] cid=${ep.cid} aid=${ep.aid} lastPlayTime=${lastPlayTime}ms")
             return index to lastPlayTime
         }
 
         // 从前往后分批探测
         var offset = 0
-        while (offset < episodes.size) {
-            val end = minOf(offset + batchSize - 1, episodes.size - 1)
-            val batchIndices = (offset..end).toList()
+        while (offset < probeIndices.size) {
+            val end = minOf(offset + batchSize - 1, probeIndices.size - 1)
+            val batchIndices = (offset..end).map { probeIndices[it] }
             val batchResults = batchIndices.map { idx -> async { queryEpisode(idx) } }.awaitAll()
 
             // 在批次内从后往前找最后一个有效的
@@ -2332,7 +2392,7 @@ class VideoPlayerViewModel(
         }
 
         val probeDurationMs = System.currentTimeMillis() - probeStartMs
-        AppLog.i(TAG, "probe_resume not_found: episodes=${episodes.size} durationMs=$probeDurationMs")
+        AppLog.i(TAG, "probe_resume not_found: episodes=${probeIndices.size} durationMs=$probeDurationMs")
         return@coroutineScope null
     }
 

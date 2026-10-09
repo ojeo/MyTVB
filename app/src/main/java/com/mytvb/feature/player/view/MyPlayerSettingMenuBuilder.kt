@@ -132,7 +132,7 @@ internal class MyPlayerSettingMenuBuilder(
             PlayerSettingRow.Item(
                 id = index,
                 title = quality.displayName(context),
-                value = quality.resolution,
+                value = "",
                 checked = quality.id == state.currentVideoQuality?.id,
                 showArrow = false
             )

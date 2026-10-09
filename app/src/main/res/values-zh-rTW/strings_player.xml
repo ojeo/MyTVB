@@ -67,15 +67,6 @@
 
     <!-- 播放器：除錯浮層 -->
     <string name="player_view_count_play_format">%1$s播放</string>
-    <string name="player_debug_resolution_format">解析度：%1$s</string>
-    <string name="player_debug_video_format">影片：%1$s</string>
-    <string name="player_debug_audio_format">音訊：%1$s</string>
-    <string name="player_debug_progress_format">進度：%1$s</string>
-    <string name="player_debug_buffer_format">緩衝：%1$s</string>
-    <string name="player_debug_state_format">狀態：%1$s</string>
-    <string name="player_state_buffering">緩衝中</string>
-    <string name="player_state_playing">播放中</string>
-    <string name="player_state_ended">已結束</string>
 
     <!-- 直播 -->
     <string name="live_toast_refreshing">正在重新整理</string>
@@ -103,4 +94,29 @@
     <string name="series_error_unfollow_failed">取消追番失敗</string>
     <string name="series_error_timeline_failed">時間軸載入失敗</string>
     <string name="series_error_recommend_failed">推薦載入失敗</string>
+    <string name="player_hdr_unsupported_hint">電視或播放裝置可能不支援「%1$s」，若播放異常請切回其他畫質</string>
+
+    <!-- 视频评论 / Video comments -->
+    <string name="player_comment_title">評論</string>
+    <string name="player_comment_title_with_count_format">評論(%1$s)</string>
+    <string name="player_comment_sort_hot">熱門</string>
+    <string name="player_comment_sort_new">最新</string>
+    <string name="player_comment_loading">載入中…</string>
+    <string name="player_comment_empty">暫無評論</string>
+    <string name="player_comment_load_failed">評論載入失敗</string>
+    <string name="player_comment_thread_empty">暫無回覆</string>
+    <string name="player_comment_thread_title">評論詳情</string>
+    <string name="player_comment_thread_section">相關回覆</string>
+    <string name="player_comment_thread_section_format">相關回覆共%1$s條</string>
+    <string name="player_comment_level_accessibility">用戶等級 %1$d</string>
+    <string name="player_comment_level_senior_accessibility">硬核會員，用戶等級 %1$d</string>
+    <string name="player_comment_note_tag">筆記</string>
+    <string name="player_comment_up_liked">UP主覺得很讚</string>
+    <string name="player_comment_top_tag">置頂</string>
+    <string name="player_comment_no_aid">影片資訊未載入</string>
+    <string name="player_comment_expand">展開</string>
+    <string name="player_comment_collapse">收起</string>
+    <string name="player_comment_view_all_replies_format">查看全部 %1$s 條回覆</string>
+    <string name="player_comment_view_all_replies_long_press_format">長按查看全部 %1$s 條回覆</string>
+    <string name="player_comment_note_image_loading">載入圖片中…</string>
 </resources>

@@ -2,7 +2,7 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_marginBottom="2dp"
+    android:layout_marginBottom="@dimen/px5"
     android:background="@drawable/bg_marmot_channel_item"
     android:clickable="true"
     android:descendantFocusability="blocksDescendants"
@@ -10,7 +10,7 @@
     android:focusableInTouchMode="true"
     android:gravity="center_vertical"
     android:orientation="horizontal"
-    android:padding="10dp">
+    android:padding="@dimen/px23">
 
     <TextView
         android:id="@+id/playing_mark"
@@ -18,7 +18,7 @@
         android:layout_height="wrap_content"
         android:text="▶ "
         android:textColor="#00FF00"
-        android:textSize="14sp"
+        android:textSize="@dimen/px32"
         android:visibility="gone" />
 
     <TextView
@@ -30,13 +30,13 @@
         android:gravity="center_vertical"
         android:maxLines="1"
         android:textColor="@android:color/white"
-        android:textSize="16sp" />
+        android:textSize="@dimen/px36" />
 
     <ImageView
         android:id="@+id/favorite_icon"
-        android:layout_width="24dp"
-        android:layout_height="24dp"
-        android:layout_marginStart="8dp"
+        android:layout_width="@dimen/px54"
+        android:layout_height="@dimen/px54"
+        android:layout_marginStart="@dimen/px18"
         android:clickable="false"
         android:contentDescription="@null"
         android:focusable="false"

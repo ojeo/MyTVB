@@ -27,7 +27,9 @@ import com.mytvb.core.ui.focus.tv.TvListFocusController
 class SearchResultPagerAdapter(
     private val onItemClick: (SearchResultEntry) -> Unit,
     private val onLoadMore: (SearchType) -> Unit,
-    private val onTopEdgeUp: ((View) -> Boolean)? = null
+    private val onTopEdgeUp: ((View) -> Boolean)? = null,
+    private val onCachedRelation: ((Long) -> Boolean?)? = null,
+    private val onQueryRelation: ((Long) -> Unit)? = null
 ) : RecyclerView.Adapter<SearchResultPagerAdapter.ViewHolder>() {
 
     private companion object {
@@ -71,6 +73,20 @@ class SearchResultPagerAdapter(
     fun getPageTitle(position: Int): String = pages.getOrNull(position)?.title.orEmpty()
 
     fun getPageType(position: Int): SearchType? = pages.getOrNull(position)?.type
+
+    /** 关注状态查询完成后，把结果分发到各页的条目适配器做局部刷新。 */
+    fun updateRelation(mid: Long) {
+        holders.values.forEach { holder ->
+            holder.dispatchRelationUpdate(mid)
+        }
+    }
+
+    /** 缓存失效后整页重绑（重查关注状态）。 */
+    fun refreshRelations() {
+        holders.values.forEach { holder ->
+            holder.dispatchRelationRefresh()
+        }
+    }
 
     fun setPages(
         categories: List<SearchCategoryItem>,
@@ -170,8 +186,22 @@ class SearchResultPagerAdapter(
             AppLog.d(TAG, "restoreFocusAnchors: focus already inside a page list, skip")
             return
         }
+        // 离开时焦点就不在搜索结果页（focusedPageType=null，如焦点在底层 tab 页列表上
+        // 直接进播放）：焦点恢复职责不归搜索页，继续走 fallback 会把底层页面已恢复好
+        // 的焦点抢到结果页。
+        if (focusedPageType == null) {
+            AppLog.d(TAG, "restoreFocusAnchors: focusedPageType=null, skip")
+            return
+        }
+        // 结果面板整体不可见（搜索浮层未随本页显示）：对不可见面板恢复焦点等于把
+        // 焦点藏进看不见的列表，表现为返回后焦点消失、按 BACK 才重新出现。
+        if (holders.values.none { it.isPageVisible() }) {
+            AppLog.d(TAG, "restoreFocusAnchors: result panel not shown, skip")
+            return
+        }
         val focusedType = focusedPageType
-        val focusedHolder = focusedType?.let { holders[it] }
+        // 离屏的 focused 页同样不可见，不直接恢复，交给下方可见页 fallback。
+        val focusedHolder = focusedType?.let { holders[it] }?.takeIf { it.isPageVisible() }
         if (focusedHolder != null) {
             AppLog.d(TAG, "restoreFocusAnchors: trying focused page=$focusedType")
             if (focusedHolder.restoreFocusAnchor()) {
@@ -191,7 +221,9 @@ class SearchResultPagerAdapter(
             }
         if (!restored) {
             AppLog.d(TAG, "restoreFocusAnchors: all FAILED, falling back to focusPrimaryContent")
-            holders.values.forEach { it.focusPrimaryContent() }
+            // 兜底与上方 fallback 同一可见性约束：不可见页的 focusPrimaryContent 一样
+            // 能聚焦成功，会让焦点落在看不见的列表上。
+            holders.values.filter { it.isPageVisible() }.forEach { it.focusPrimaryContent() }
         }
     }
 
@@ -211,8 +243,11 @@ class SearchResultPagerAdapter(
                 currentType = page.type
                 val spanCount = when (page.type) {
                     SearchType.Video,
-                    SearchType.LiveRoom,
-                    SearchType.User -> binding.root.resources.adaptiveSpanCount()
+                    SearchType.LiveRoom -> binding.root.resources.adaptiveSpanCount()
+
+                    // 用户条目三行文字（昵称/粉丝·视频·认证/签名），窄列下文字区不足会截断，
+                    // 对齐官方 TV 端 2 列大条目
+                    SearchType.User -> binding.root.resources.adaptiveSpanCount(base = 2, wide = 4)
 
                     SearchType.Animation,
                     SearchType.FilmAndTv -> binding.root.resources.adaptiveSpanCount(base = 6, wide = 8)
@@ -230,7 +265,9 @@ class SearchResultPagerAdapter(
                     },
                     onItemsChanged = {
                         tvFocusController?.onDataChanged(TvDataChangeReason.REMOVE_ITEM)
-                    }
+                    },
+                    onCachedRelation = onCachedRelation,
+                    onQueryRelation = onQueryRelation
                 )
                 binding.recyclerViewResult.layoutManager =
                     WrapContentGridLayoutManager(binding.root.context, spanCount)
@@ -316,8 +353,19 @@ class SearchResultPagerAdapter(
             return tvFocusController?.hasFocusInList() == true
         }
 
-        fun isPageVisible(): Boolean {
-            return itemView.isShown
+        fun dispatchRelationUpdate(mid: Long) {
+            if (currentType == SearchType.User) {
+                currentAdapter?.updateRelation(mid)
+            }
+        }
+
+        fun dispatchRelationRefresh() {
+            if (currentType == SearchType.User) {
+                currentAdapter?.refreshAllRelations()
+            }
+        }
+
+        fun isPageVisible(): Boolean {            return itemView.isShown
         }
 
         fun restoreFocusAnchor(): Boolean {

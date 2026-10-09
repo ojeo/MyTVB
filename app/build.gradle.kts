@@ -54,8 +54,8 @@ android {
         applicationId = (project.findProperty("applicationId") as? String) ?: "com.mytvb"
         minSdk = 23
         targetSdk = 35
-        versionCode = 91
-        versionName = "2.0.7"
+        versionCode = 97
+        versionName = "2.1.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -87,6 +87,8 @@ android {
                 "META-INF/LICENSE*",
                 "META-INF/NOTICE*",
                 "META-INF/*.kotlin_module",
+                // protobuf 描述文件只有 protoc 编译期用得到，运行时不需要
+                "google/**/*.proto",
             )
         }
     }
