@@ -11,7 +11,10 @@
 *.ipr
 
 # ========== 编译输出 ==========
-build/
+# 忽略任意层级的构建产物（如 build/、app/build/），但放行仓库根下的本地构建脚本：
+# build/scripts/ 是源码性质的工具脚本，非构建产物。
+**/build/*
+!/build/scripts/
 app/release/
 *.apk
 *.aab
