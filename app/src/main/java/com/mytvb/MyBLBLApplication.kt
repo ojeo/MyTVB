@@ -4,6 +4,7 @@ import android.app.Application
 import android.os.SystemClock
 import com.mytvb.core.common.cache.FileCacheManager
 import com.mytvb.core.common.log.AppLog
+import com.mytvb.core.common.media.VideoCodecSupport
 import com.mytvb.core.common.settings.AppSettingsDataStore
 import com.mytvb.core.common.update.ApkUpdater
 import com.mytvb.core.lifecycle.AppBackgroundMonitor
@@ -11,6 +12,7 @@ import com.mytvb.core.ui.image.ImageLoader
 import com.mytvb.di.appModules
 import com.mytvb.feature.home.RecommendFeedRepository
 import com.mytvb.feature.player.PlayerInstancePool
+import com.mytvb.feature.player.settings.PlayerSettingsStore
 import com.mytvb.network.NetworkManager
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
@@ -76,8 +78,12 @@ class MyBLBLApplication : Application() {
         // 多进程使用 WebView 时数据目录冲突会导致 X5/系统 WebView 初始化崩溃。
         initPieWebViewDataDir()
         AppLog.init(this)
+        // 全局提示浮层需要跟踪前台 Activity（挂 decorView，绕开系统 Toast 的宽度上限）
+        com.mytvb.core.ui.base.AppToast.install(this)
+        // 播放进度本地缓存装载（文件小、毫秒级）：供续播插层与 UP 空间卡片进度使用
+        com.mytvb.feature.player.progress.PlaybackProgressStore.init(this)
         // Toast 等使用 Application 级 Resources 的场景与 Activity 同倍率
-        com.mytvb.core.ui.base.UiScale.apply(resources)
+        com.mytvb.core.ui.base.UiScale.apply(resources, "app")
         AppLog.i(TAG, "STARTUP T0 app.onCreate start")
         AppLog.i(TAG, "STARTUP T1 app.onCreate end minimal elapsed=${SystemClock.elapsedRealtime() - startMs}ms")
     }
@@ -90,6 +96,11 @@ class MyBLBLApplication : Application() {
             AppLog.i(TAG, "STARTUP uiRuntimeInit start reason=$reason")
             // UI 首帧只需要 DI 和生命周期监听。设置缓存只启动异步读取，不再卡住 Main 首帧。
             trace("initKoin", startMs) { initKoin() }
+            // 解码方式偏好数据源：core 层解码器 selector/能力预检经此实时读取"软解视频"开关
+            // （读 AppSettings 内存缓存，settings 变更即刻反映，无需重建播放器池）。
+            VideoCodecSupport.softwareDecoderPreferenceSource = {
+                PlayerSettingsStore.isSoftwareDecoderEnabled()
+            }
             trace("startSettingsCacheAsync", startMs) { startSettingsCacheAsync() }
             trace("initBackgroundMonitor", startMs) { AppBackgroundMonitor.init(this) }
             // 后台预热拼音字典表，避免首次进入动态页做首字母匹配时卡顿

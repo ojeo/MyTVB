@@ -28,6 +28,8 @@ class VideoAdapter(
     private val displayStyle: DisplayStyle = DisplayStyle.DEFAULT,
     private val itemWidthPx: Int? = null,
     private val onItemClick: (VideoModel) -> Unit = {},
+    private val titleLines: Int = 2,
+    private val showOwnerLine: Boolean = true,
     onTopEdgeUp: (() -> Boolean)? = null,
     onBottomEdgeDown: (() -> Boolean)? = null,
     onLeftEdge: (() -> Boolean)? = null,
@@ -145,6 +147,8 @@ class VideoAdapter(
             views,
             displayStyle,
             clickLambda,
+            titleLines,
+            showOwnerLine,
             onTopEdgeUp,
             onBottomEdgeDown,
             onLeftEdge,
@@ -184,6 +188,8 @@ class VideoAdapter(
         private val views: VideoCardViews,
         private val displayStyle: DisplayStyle,
         private val onItemClick: (View, VideoModel) -> Unit,
+        private val titleLines: Int = 2,
+        private val showOwnerLine: Boolean = true,
         onTopEdgeUp: (() -> Boolean)?,
         onBottomEdgeDown: (() -> Boolean)?,
         onLeftEdge: (() -> Boolean)? = null,
@@ -307,10 +313,10 @@ class VideoAdapter(
             if (isCurrentlyPlaying) {
                 titleInPlayingMode = true
                 val accentColor = ContextCompat.getColor(views.root.context, R.color.colorAccent)
-                views.textLayer.setTitle(title, lines = 2, isPlaying = true, color = accentColor)
+                views.textLayer.setTitle(title, lines = titleLines, isPlaying = true, color = accentColor)
             } else {
                 titleInPlayingMode = false
-                views.textLayer.setTitle(title, lines = 2, isPlaying = false, color = defaultTitleColor)
+                views.textLayer.setTitle(title, lines = titleLines, isPlaying = false, color = defaultTitleColor)
             }
             when (displayStyle) {
                 DisplayStyle.DEFAULT -> bindDefault(video)
@@ -352,14 +358,18 @@ class VideoAdapter(
         private fun bindDefault(video: VideoModel) {
             views.textLayer.clearHistoryTrailing()
 
-            val ownerName = video.authorName
-            val publishLabel = TimeUtils.formatRelativeTime(views.root.context, if (video.pubDate > 0) video.pubDate else video.createTime)
-            val ownerLine = buildOwnerLine(ownerName, publishLabel)
-            views.textLayer.setOwner(
-                ownerText = ownerLine,
-                showAvatar = ownerName.isNotBlank() && !video.isPortrait,
-                badgeText = badgeTextFor(video)
-            )
+            if (!showOwnerLine) {
+                // 紧凑卡片（如播放结束推荐页）：不设 owner 内容，文字层测量时该行高度归零
+                views.textLayer.setOwner(ownerText = "", showAvatar = false)
+            } else {
+                val ownerName = video.authorName
+                val publishLabel = TimeUtils.formatRelativeTime(views.root.context, if (video.pubDate > 0) video.pubDate else video.createTime)
+                views.textLayer.setOwner(
+                    ownerText = buildOwnerLine(ownerName, publishLabel),
+                    showAvatar = ownerName.isNotBlank() && !video.isPortrait,
+                    badgeText = badgeTextFor(video)
+                )
+            }
 
             val duration = video.durationValue
             val progress = watchedProgress(video.historyProgress, duration)
@@ -386,7 +396,9 @@ class VideoAdapter(
                 playCountText = views.root.context.let { NumberUtils.formatCount(it, video.viewCount) },
                 showPlayCount = true,
                 danmakuText = views.root.context.let { NumberUtils.formatCount(it, video.danmakuCount) },
-                showDanmakuCount = true,
+                // 弹幕数为 0 不画弹幕段：直播回放（x/series/archives）接口不返回弹幕数，
+                // 显示固定 "0" 会误导（与搜索页 showDanmakuCount = danmaku > 0 同款降级）
+                showDanmakuCount = video.danmakuCount > 0L,
                 durationText = durationText,
                 showChargeBadge = video.isChargingExclusive,
                 showInteractionBadge = video.isSteinsGate
@@ -448,10 +460,31 @@ class VideoAdapter(
         }
 
         private fun badgeTextFor(video: VideoModel): String {
-            val parts = mutableListOf<String>()
-            if (video.isFollowed) parts.add(views.root.context.getString(R.string.followed))
-            if (video.isPortrait) parts.add(views.root.context.getString(R.string.adapter_portrait))
-            return parts.joinToString("|")
+            // 对齐官方：每卡只显示一个标签。
+            // 已关注/竖屏必显；理由是服务端挑选的（天然稀疏）；
+            // 数值类（百万播放/点赞/投币）本地采样约 25% 显示（aid 确定性采样，刷新不变卦）
+            return when {
+                video.isFollowed -> views.root.context.getString(R.string.followed)
+                video.isPortrait -> views.root.context.getString(R.string.adapter_portrait)
+                video.rcmdReason.isNotBlank() -> video.rcmdReason
+                !isBadgeSampled(video) -> ""
+                (video.viewCount) >= 1_000_000L -> "百万播放"
+                video.like >= 1_000L -> "${milestoneText(video.like)}点赞"
+                video.coinCount >= 1_000L -> "${milestoneText(video.coinCount)}投币"
+                else -> ""
+            }
+        }
+
+        /** 数值类标签采样：aid 稳定散列取约 1/4 的卡，同一卡每次渲染结果一致。 */
+        private fun isBadgeSampled(video: VideoModel): Boolean {
+            val salt = if (video.bvid.isNotBlank()) video.bvid.hashCode() else video.aid.toInt()
+            return (salt and 0xFF) < 64
+        }
+
+        /** 里程碑进位：≥1万 显示整万，≥1千 显示整千（调用方保证 ≥1千）。 */
+        private fun milestoneText(count: Long): String = when {
+            count >= 10_000L -> "${count / 10_000L}万"
+            else -> "${count / 1_000L}千"
         }
 
         private fun resolveDisplayTitle(video: VideoModel): String {

@@ -6,9 +6,9 @@ import android.os.CountDownTimer
 import android.text.Html
 import android.view.LayoutInflater
 import android.view.Window
-import android.view.WindowManager
 import androidx.appcompat.app.AppCompatDialog
 import com.mytvb.R
+import com.mytvb.core.ui.base.DialogWindowFit
 import com.mytvb.databinding.DialogUsageTipBinding
 
 class UsageTipDialog(context: Context) : AppCompatDialog(context, R.style.DialogTheme) {
@@ -18,14 +18,16 @@ class UsageTipDialog(context: Context) : AppCompatDialog(context, R.style.Dialog
 
     init {
         supportRequestWindowFeature(Window.FEATURE_NO_TITLE)
-        setContentView(binding.root)
         // 返回键允许直接关闭：否则倒计时期间遥控器/触屏没有任何退出途径，
         // 用户只能强杀应用（usage_tip_shown 已落盘，关闭后不再弹出）。
         setCancelable(true)
         setCanceledOnTouchOutside(false)
-        window?.setLayout(
+        // fill 全屏窗口 + 居中卡片（华为电视对独立小窗有延迟裁高，fill 载体不受影响）
+        DialogWindowFit.overlay(
+            this, binding.root,
             (context.resources.displayMetrics.widthPixels * 0.6).toInt(),
-            WindowManager.LayoutParams.WRAP_CONTENT
+            cancelOnOutside = false,
+            tag = "usageTip"
         )
         // 内容在小屏/大字号下可能高过屏幕，限制滚动区高度避免按钮被推出屏幕
         binding.textScroll.maxHeight =

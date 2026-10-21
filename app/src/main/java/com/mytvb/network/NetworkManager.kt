@@ -34,7 +34,13 @@ object NetworkManager {
     private const val KEY_CURRENT_UA = "currentUA"
     private const val AUTH_INVALID_CODE = -101
     private const val KEY_REFRESH_TOKEN = "bili_refresh_token"
+    private const val KEY_APP_ACCESS_TOKEN = "app_access_token"
+    private const val KEY_APP_REFRESH_TOKEN = "app_refresh_token"
+    private const val KEY_APP_TOKEN_EXPIRES_AT = "app_token_expires_at"
     private const val KEY_HTTP_CACHE_SCHEMA = "http_cache_schema"
+    private const val KEY_SESSION_HEALTH_CHECK_TS = "session_health_check_ts"
+    /** -101 软清后的恢复调度节流，防止并行请求同时失效触发恢复风暴 */
+    private const val SOFT_CLEAR_RECOVERY_THROTTLE_MS = 60_000L
     /** 修改 HTTP 协商缓存结构时递增此值，可以在用户下次冷启动时一次性清空旧缓存。*/
     private const val HTTP_CACHE_SCHEMA = 1
 
@@ -47,6 +53,34 @@ object NetworkManager {
 
     @Volatile
     private var coreInitialized = false
+
+    private val sessionOwnerVersion = java.util.concurrent.atomic.AtomicLong()
+    private val sessionLifecycle by lazy {
+        com.mytvb.network.session.SessionLifecycleCoordinator(
+            hasCookie = { internalCookieManager.hasSessionCookie() },
+            hasRefreshToken = { !getRefreshToken().isNullOrBlank() },
+            ownerVersion = { sessionOwnerVersion.get() },
+            probe = {
+                val response = apiService.getUserDetailInfo()
+                when {
+                    response.isSuccess && response.data?.isLogin == true ->
+                        com.mytvb.network.session.SessionLifecycleCoordinator.Probe.Valid(requireNotNull(response.data))
+                    response.code == -101 || (response.isSuccess && response.data?.isLogin == false) ->
+                        com.mytvb.network.session.SessionLifecycleCoordinator.Probe.Expired
+                    else -> com.mytvb.network.session.SessionLifecycleCoordinator.Probe.Unavailable
+                }
+            },
+            refresh = { securityCoordinator.forceCookieRefresh() },
+            accept = { info: UserDetailInfoModel -> updateUserSession(info) },
+            clear = { hardClearAndNotify("confirmed_session_expired") },
+            lastChecked = { KoinPlatform.getKoin().get<AppSettingsDataStore>().getCachedLong(KEY_SESSION_HEALTH_CHECK_TS) },
+            markChecked = { time -> KoinPlatform.getKoin().get<AppSettingsDataStore>().putLongAsync(KEY_SESSION_HEALTH_CHECK_TS, time) }
+        )
+    }
+
+    @Volatile
+    private var lastSoftClearRecoveryAt = 0L
+    private val softClearRecoveryLock = Any()
 
     private val userAgentStore = DesktopUserAgentStore(
         defaultUserAgent = DEFAULT_UA,
@@ -88,6 +122,16 @@ object NetworkManager {
             .cookieJar(okhttp3.CookieJar.NO_COOKIES)
             .build()
     }
+
+    private val guestApiService: ApiService by lazy {
+        val client = internalOkHttpClient.newBuilder()
+            .cookieJar(com.mytvb.network.cookie.GuestCookieJar())
+            .cache(null)
+            .build()
+        NetworkClientFactory.createRetrofit(API_BASE, client, gson).create(ApiService::class.java)
+    }
+
+    fun getGuestPlaybackApi(): ApiService = guestApiService
 
     private val gson by lazy {
         GsonHolder.CONFIGURED
@@ -144,6 +188,16 @@ object NetworkManager {
             sessionStore.initPersistence(
                 applicationContext.getSharedPreferences("network_session_store", Context.MODE_PRIVATE)
             )
+            com.mytvb.network.session.RequestSessionScope.configure {
+                val info = sessionStore.getUserInfo()
+                listOf(
+                    internalCookieManager.getCookieValue("SESSDATA").orEmpty(),
+                    internalCookieManager.getCookieValue("DedeUserID").orEmpty(),
+                    KoinPlatform.getKoin().get<AppSettingsDataStore>().getCachedString(KEY_APP_ACCESS_TOKEN).orEmpty(),
+                    info?.mid.toString(),
+                    info?.vipStatus.toString(), info?.vipType.toString(), info?.vipDueDate.toString()
+                )
+            }
             // cookie 在上一步已从磁盘恢复，这里统一对齐一次会话状态
             sessionStore.refreshSessionState()
             sessionInitialized = true
@@ -240,6 +294,8 @@ object NetworkManager {
     }
 
     fun clearUserSession(clearCookies: Boolean = true, reason: String = "unknown") {
+        sessionOwnerVersion.incrementAndGet()
+        com.mytvb.network.session.RequestSessionScope.invalidate()
         val hadSession = sessionStore.getUserInfo() != null || internalCookieManager.hasSessionCookie()
         sessionStore.clearUserSession()
         resetSessionLifecycleState(clearCookies = clearCookies, reason = reason)
@@ -260,47 +316,73 @@ object NetworkManager {
             // 服务端 -101 失效也会走这里；只有状态真正发生跳变才广播，防并行请求事件风暴
             notifySessionChanged()
         }
+        scheduleSoftClearRecovery()
     }
 
-    suspend fun tryRecoverExpiredSession(): Boolean {
-        if (!internalCookieManager.hasSessionCookie()) {
-            AppLog.w(TAG, "tryRecoverExpiredSession: no SESSDATA, cannot recover")
-            hardClearAndNotify("recovery_no_sessdata")
-            return false
+    /**
+     * -101 软清后 SESSDATA 仍在本地但已被服务端拒绝，timeline 等降级型接口不会再回
+     * -101，被动检测从此静默；在软清现场主动补一次健康检查（内部先试 refresh_token
+     * 恢复、确认失效则全清），把"静默降级池"窗口从下一次冷启动（最长 24h）压到分钟级。
+     * 并行请求同时 -101 时靠 [SOFT_CLEAR_RECOVERY_THROTTLE_MS] 节流合并为一次。
+     */
+    private fun scheduleSoftClearRecovery() {
+        val now = System.currentTimeMillis()
+        synchronized(softClearRecoveryLock) {
+            if (now - lastSoftClearRecoveryAt < SOFT_CLEAR_RECOVERY_THROTTLE_MS) return
+            lastSoftClearRecoveryAt = now
         }
-        if (getRefreshToken().isNullOrBlank()) {
-            AppLog.w(TAG, "tryRecoverExpiredSession: no refresh_token, cannot recover")
-            hardClearAndNotify("recovery_no_refresh_token")
-            return false
-        }
-        return try {
-            securityCoordinator.forceCookieRefresh()
-            val navResponse = apiService.getUserDetailInfo()
-            if (navResponse.isSuccess && navResponse.data != null) {
-                sessionStore.updateUserSession(navResponse.data)
-                AppLog.i(TAG, "tryRecoverExpiredSession: session recovered successfully")
-                notifySessionChanged()
-                true
-            } else if (navResponse.code == -101) {
-                AppLog.w(TAG, "tryRecoverExpiredSession: still -101 after refresh, session truly expired")
-                hardClearAndNotify("recovery_still_expired")
-                false
-            } else {
-                AppLog.w(TAG, "tryRecoverExpiredSession: nav check failed after refresh, code=${navResponse.code}")
-                hardClearAndNotify("recovery_nav_failed")
-                false
+        Thread({
+            val result = runCatching {
+                kotlinx.coroutines.runBlocking { checkSessionHealth(force = true) }
+            }.getOrNull()
+            AppLog.i(TAG, "softClear recovery check finished: result=$result")
+            if (result == SessionHealthResult.EXPIRED_CLEARED) {
+                appContext?.let { ctx ->
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        runCatching { com.mytvb.core.ui.base.AppToast.show(ctx, com.mytvb.R.string.session_expired_relogin) }
+                    }
+                }
             }
-        } catch (e: Exception) {
-            AppLog.e(TAG, "tryRecoverExpiredSession: exception during recovery", e)
-            hardClearAndNotify("recovery_exception")
-            false
-        }
+        }, "session-softclear-recovery").apply {
+            isDaemon = true
+        }.start()
     }
+
+    suspend fun tryRecoverExpiredSession(): Boolean =
+        sessionLifecycle.recover() == com.mytvb.network.session.SessionLifecycleCoordinator.Outcome.RECOVERED
 
     private fun hardClearAndNotify(reason: String) {
         // 广播已收敛到 clearUserSession 内部（跳变守卫），此处不再重复 notify
         clearUserSession(clearCookies = true, reason = reason)
     }
+
+    /** 登录态健康检查结果，UI 据此决定是否提示重新登录。 */
+    enum class SessionHealthResult {
+        /** cookie 有效，顺带刷新了本地用户资料 */
+        LOGGED_IN,
+        /** cookie 曾失效，已用 refresh_token 恢复 */
+        RECOVERED,
+        /** 确认失效且恢复失败，已全清会话并广播（该弹提示） */
+        EXPIRED_CLEARED,
+        /** 本地无 SESSDATA，本来就是未登录态 */
+        SKIP_NO_COOKIE,
+        /** 24h 内已查过，本次跳过 */
+        SKIP_THROTTLED,
+        /** 网络异常无法判定，不动会话（下次启动再查） */
+        NETWORK_ERROR
+    }
+
+    /**
+     * 主动校验本地 SESSDATA 在服务端是否仍有效。
+     *
+     * 背景：timeline 等降级型接口在 cookie 失效时返回 code=0 的兜底数据而非 -101，
+     * -101 被动检测永远不触发，失效会话会静默拿到降级池；本检查在冷启动后主动调
+     * nav（带 cookie 的游客响应是 code=0 + isLogin=false，必须看 isLogin 而非 code）
+     * 弥补这一盲区。确认失效时先走 refresh 恢复，恢复失败由 [tryRecoverExpiredSession]
+     * 内部全清（含 cookie）并广播 UserSessionChanged。
+     */
+    suspend fun checkSessionHealth(force: Boolean = false): SessionHealthResult =
+        SessionHealthResult.valueOf(sessionLifecycle.check(force).name)
 
     private fun notifySessionChanged() {
         runCatching {
@@ -313,6 +395,7 @@ object NetworkManager {
         if (clearCookies) {
             internalCookieManager.clearCookies()
             clearRefreshToken()
+            clearAppToken()
         }
         securityCoordinator.resetRuntimeState()
     }
@@ -320,12 +403,15 @@ object NetworkManager {
     private fun getRefreshToken(): String? {
         return runCatching {
             KoinPlatform.getKoin().get<AppSettingsDataStore>().getCachedString(KEY_REFRESH_TOKEN)
+                ?.let(com.mytvb.network.security.SessionStorageCipher::decrypt)
+                ?.takeIf { it.isNotBlank() }
         }.getOrNull()
     }
 
     private fun saveRefreshToken(token: String) {
         runCatching {
-            KoinPlatform.getKoin().get<AppSettingsDataStore>().putStringAsync(KEY_REFRESH_TOKEN, token)
+            val stored = com.mytvb.network.security.SessionStorageCipher.encrypt(token) ?: token
+            KoinPlatform.getKoin().get<AppSettingsDataStore>().putStringAsync(KEY_REFRESH_TOKEN, stored)
         }.onFailure {
             AppLog.e(TAG, "saveRefreshToken failed: ${it.message}")
         }
@@ -341,7 +427,60 @@ object NetworkManager {
         clearRefreshToken()
     }
 
+    /**
+     * app 端 access_token（TV 扫码登录的 token_info 下发），过期或缺失返回空串。
+     * 供 app 侧接口（x/v2/feed/index 等）作为 access_key 使用。
+     */
+    fun getAppAccessToken(): String {
+        return runCatching {
+            val store = KoinPlatform.getKoin().get<AppSettingsDataStore>()
+            val expiresAt = store.getCachedLong(KEY_APP_TOKEN_EXPIRES_AT)
+            if (expiresAt in 1 until System.currentTimeMillis()) {
+                AppLog.i(TAG, "app access_token expired at $expiresAt, ignore")
+                ""
+            } else {
+                store.getCachedString(KEY_APP_ACCESS_TOKEN)
+                    ?.let(com.mytvb.network.security.SessionStorageCipher::decrypt)
+                    .orEmpty()
+            }
+        }.getOrNull().orEmpty()
+    }
+
+    fun saveAppToken(accessToken: String, refreshToken: String, expiresInSec: Long) {
+        runCatching {
+            val store = KoinPlatform.getKoin().get<AppSettingsDataStore>()
+            // 留 1 天提前量，避免拿临界有效 token 打请求
+            val usableMs = (expiresInSec - 24L * 60 * 60) * 1000
+            store.putStringAsync(
+                KEY_APP_ACCESS_TOKEN,
+                com.mytvb.network.security.SessionStorageCipher.encrypt(accessToken) ?: accessToken
+            )
+            store.putStringAsync(
+                KEY_APP_REFRESH_TOKEN,
+                com.mytvb.network.security.SessionStorageCipher.encrypt(refreshToken) ?: refreshToken
+            )
+            store.putLongAsync(
+                KEY_APP_TOKEN_EXPIRES_AT,
+                if (usableMs > 0) System.currentTimeMillis() + usableMs else 0L
+            )
+        }.onFailure {
+            AppLog.e(TAG, "saveAppToken failed: ${it.message}")
+        }
+    }
+
+    private fun clearAppToken() {
+        runCatching {
+            val store = KoinPlatform.getKoin().get<AppSettingsDataStore>()
+            store.putStringAsync(KEY_APP_ACCESS_TOKEN, null)
+            store.putStringAsync(KEY_APP_REFRESH_TOKEN, null)
+            store.putLongAsync(KEY_APP_TOKEN_EXPIRES_AT, 0L)
+        }
+    }
+
     suspend fun activateAfterLogin() {
+        sessionOwnerVersion.incrementAndGet()
+        com.mytvb.network.session.RequestSessionScope.invalidate()
+        KoinPlatform.getKoin().get<AppSettingsDataStore>().putLongAsync(KEY_SESSION_HEALTH_CHECK_TS, 0L)
         securityCoordinator.activateAfterLogin()
         // 登录 cookie 已写入（扫码流程），立即从 LoggedOut 对齐到 CookieOnly，
         // 不必等首次 nav 请求返回

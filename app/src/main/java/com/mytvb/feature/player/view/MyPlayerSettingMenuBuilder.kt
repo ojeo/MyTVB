@@ -35,6 +35,7 @@ internal class MyPlayerSettingMenuBuilder(
         val currentVideoQuality: VideoQuality? = null,
         val currentAudioQuality: AudioQuality? = AudioQuality.AUDIO_192K,
         val currentVideoCodec: VideoCodecEnum? = VideoCodecEnum.HEVC,
+        val softwareDecoderEnabled: Boolean = false,
         val currentSubtitlePosition: Int = -1,
         val currentSpeed: Float = 1.0f,
         val currentScreenRatio: Int = 0,
@@ -93,6 +94,12 @@ internal class MyPlayerSettingMenuBuilder(
                 id = MyPlayerSettingView.ITEM_VIDEO_CODEC,
                 title = context.getString(R.string.video_codec),
                 value = state.currentVideoCodec?.displayName ?: "HEVC",
+                iconRes = R.drawable.ic_setting
+            ),
+            PlayerSettingRow.Item(
+                id = MyPlayerSettingView.ITEM_DECODER_MODE,
+                title = context.getString(R.string.software_video_decoder),
+                value = state.softwareDecoderEnabled.toOpenCloseLabel(),
                 iconRes = R.drawable.ic_setting
             ),
             PlayerSettingRow.Item(

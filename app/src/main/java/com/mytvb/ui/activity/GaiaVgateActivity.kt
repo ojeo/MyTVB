@@ -32,7 +32,7 @@ class GaiaVgateActivity : AppCompatActivity() {
     private val webGateway: NetworkWebGateway by inject()
 
     override fun attachBaseContext(newBase: Context) {
-        UiScale.apply(newBase.resources)
+        UiScale.apply(newBase.resources, "gaia")
         super.attachBaseContext(newBase)
     }
 

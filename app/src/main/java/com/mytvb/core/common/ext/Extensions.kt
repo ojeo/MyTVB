@@ -4,6 +4,7 @@ import android.content.Context
 import android.widget.Toast
 import androidx.annotation.StringRes
 import com.mytvb.core.common.settings.AppSettingsDataStore
+import com.mytvb.core.ui.base.AppToast
 import org.koin.mp.KoinPlatform
 
 private const val VALUE_ON = "开"
@@ -14,11 +15,11 @@ private val appSettings: AppSettingsDataStore
     get() = KoinPlatform.getKoin().get()
 
 fun Context.toast(message: String, duration: Int = Toast.LENGTH_SHORT) {
-    Toast.makeText(applicationContext, message, duration).show()
+    AppToast.show(applicationContext, message, duration)
 }
 
 fun Context.toast(@StringRes resId: Int, duration: Int = Toast.LENGTH_SHORT) {
-    Toast.makeText(applicationContext, resId, duration).show()
+    AppToast.show(applicationContext, resId, duration)
 }
 
 fun isOpenDetailFirstEnabled(): Boolean {

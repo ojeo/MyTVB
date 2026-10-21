@@ -6,7 +6,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.webkit.JavascriptInterface
-import android.widget.Toast
+
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.mytvb.feature.marmot.domain.HzItem
@@ -15,6 +15,7 @@ import okhttp3.Request
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
+import com.mytvb.core.ui.base.AppToast
 
 /**
  * JS ↔ 原生桥梁（注册名 `_api`，对标参考 utao `LiveActivity.JsInterface`）。
@@ -61,7 +62,7 @@ class MarmotJsBridge(
     @JavascriptInterface
     fun toast(message: String) {
         Log.i(TAG, "toast: $message")
-        mainHandler.post { Toast.makeText(context, message, Toast.LENGTH_SHORT).show() }
+        mainHandler.post { AppToast.show(context, message) }
     }
 
     /**

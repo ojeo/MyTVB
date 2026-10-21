@@ -27,7 +27,7 @@ abstract class BaseActivity<VB : ViewBinding> : AppCompatActivity() {
     override fun attachBaseContext(newBase: Context) {
         // 首个 Activity 此刻 Koin 尚未启动，refresh 只能发生在 onCreate，
         // 此处先用缓存档位把 density 钉住，保证首个 inflate 就走正确倍率
-        UiScale.apply(newBase.resources)
+        UiScale.apply(newBase.resources, "attach")
         super.attachBaseContext(newBase)
     }
 
@@ -40,9 +40,9 @@ abstract class BaseActivity<VB : ViewBinding> : AppCompatActivity() {
             resources.displayMetrics.widthPixels,
             resources.displayMetrics.heightPixels
         )
-        UiScale.apply(resources)
+        UiScale.apply(resources, "onCreate")
         // 自绘卡片等走 applicationContext 的 Resources，recreate 后须同步钉到新档位
-        application.resources?.let { UiScale.apply(it) }
+        application.resources?.let { UiScale.apply(it, "onCreate/appRes") }
         UiCardSize.refresh(appSettings)
         UiTextScaleFactory.install(layoutInflater)
         // `LayoutInflater.from(this)` 是 ContextThemeWrapper 缓存的那份 inflater
@@ -70,7 +70,7 @@ abstract class BaseActivity<VB : ViewBinding> : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         // 栈下旧 Activity 恢复时按当前档位重钉（设置变更后返回时保持全栈一致）
-        UiScale.apply(resources)
+        UiScale.apply(resources, "onResume")
         if (!initialFullscreenModeDeferred) {
             applyFullscreenMode()
         }
@@ -83,15 +83,15 @@ abstract class BaseActivity<VB : ViewBinding> : AppCompatActivity() {
      */
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        UiScale.apply(resources)
-        application.resources?.let { UiScale.apply(it) }
+        UiScale.apply(resources, "config")
+        application.resources?.let { UiScale.apply(it, "config/appRes") }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
             // 窗口重新获得焦点（含系统栏显隐、从播放页返回）后再补一次，缩短密度错误窗口
-            UiScale.apply(resources)
+            UiScale.apply(resources, "focus")
             if (!initialFullscreenModeDeferred) {
                 applyFullscreenMode()
             }

@@ -352,6 +352,21 @@ class LiveRecommendFragment : BaseFragment<FragmentLiveBaseListBinding>(), LiveT
             return emptyList()
         }
 
+        // 诊断日志:关注模块服务端下发条数与本地过滤后条数,用于区分
+        // 「接口下发不全」与「屏蔽UP/青少年模式过滤」两类问题
+        data.roomList.orEmpty().forEach { wrapper ->
+            if (wrapper.moduleInfo?.title.orEmpty().contains(FOLLOW_SECTION_TITLE)) {
+                val raw = wrapper.list.orEmpty()
+                val kept = ContentFilter.filterLiveRooms(requireContext(), raw)
+                val dropped = raw.filter { item -> kept.none { it.roomId == item.roomId } }
+                AppLog.i(
+                    "LiveFollow",
+                    "关注模块 moduleId=${wrapper.moduleInfo?.id} 下发=${raw.size} 过滤后=${kept.size} " +
+                        "被过滤=${dropped.joinToString(";") { "${it.uname}#${it.roomId}" }}"
+                )
+            }
+        }
+
         val sections = mutableListOf<LiveRecommendSection>()
         val moduleSections = data.roomList.orEmpty()
             .mapNotNull { wrapper ->

@@ -9,6 +9,7 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ProgressBar
 import android.widget.Toast
+import com.mytvb.core.ui.base.AppToast
 import androidx.core.content.ContextCompat
 import androidx.core.os.bundleOf
 import androidx.lifecycle.Lifecycle
@@ -703,7 +704,8 @@ class VideoDetailFragment : androidx.fragment.app.Fragment() {
                 )
             },
             currentAid = currentAid,
-            currentVideoId = currentBvid
+            currentVideoId = currentBvid,
+            currentSeasonId = videoView?.ugcSeason?.id ?: 0L
         ).apply {
             show()
         }
@@ -714,16 +716,16 @@ class VideoDetailFragment : androidx.fragment.app.Fragment() {
             .inflate(LayoutInflater.from(requireContext()))
         dialogBinding.textDescription.text = description
         val dialog = androidx.appcompat.app.AppCompatDialog(requireContext(), R.style.DialogTheme)
-        dialog.setContentView(dialogBinding.root)
         dialog.setCanceledOnTouchOutside(true)
         dialog.setOnCancelListener { /* back key or touch outside */ }
-        dialog.show()
-        // 简介可能很长：高度超屏时钳到 92% 屏高由 ScrollView 滚动展示
-        DialogWindowFit.apply(
-            dialog.window, requireContext(),
+        // 简介可能很长：固定高卡片自动钳 92% 屏高，由布局根 ScrollView 滚动展示
+        DialogWindowFit.overlay(
+            dialog, dialogBinding.root,
             resources.getDimensionPixelSize(R.dimen.px1200),
-            resources.getDimensionPixelSize(R.dimen.px800)
+            heightPx = resources.getDimensionPixelSize(R.dimen.px800),
+            tag = "description"
         )
+        dialog.show()
     }
 
 
@@ -837,11 +839,7 @@ class VideoDetailFragment : androidx.fragment.app.Fragment() {
                         isFavorited = true
                         updateActionButtonsDirectly()
                         if (response.data?.isRisk == true) {
-                            Toast.makeText(
-                                requireContext(),
-                                getString(R.string.toast_triple_success_risk_control),
-                                Toast.LENGTH_LONG
-                            ).show()
+                            AppToast.show(requireContext(),getString(R.string.toast_triple_success_risk_control),Toast.LENGTH_LONG)
                         } else {
                             toast(getString(R.string.triple_action))
                         }
@@ -865,7 +863,7 @@ class VideoDetailFragment : androidx.fragment.app.Fragment() {
 
     private fun toast(message: String) {
         if (isAdded) {
-            Toast.makeText(requireContext(), message, Toast.LENGTH_SHORT).show()
+            AppToast.show(requireContext(), message)
         }
     }
 

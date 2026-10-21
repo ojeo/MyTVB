@@ -305,8 +305,15 @@ class AllSeriesFragment : BaseFragment<FragmentAllSeriesBinding>(), OnBackPresse
     private fun showFilterOptions(position: Int) {
         val filter = filters.getOrNull(position) ?: return
         val dialog = AppCompatDialog(requireContext(), R.style.DialogTheme)
-        dialog.setContentView(R.layout.dialog_setting_choice)
         dialog.setCanceledOnTouchOutside(true)
+        // 固定尺寸卡片（布局根 match_parent 依赖窗口定尺寸），fill 载体下显式传高
+        DialogWindowFit.overlay(
+            dialog,
+            layoutInflater.inflate(R.layout.dialog_setting_choice, null),
+            resources.getDimensionPixelSize(R.dimen.px800),
+            heightPx = resources.getDimensionPixelSize(R.dimen.px615),
+            tag = "seriesFilter"
+        )
         dialog.findViewById<View>(R.id.dialog_root)?.setOnClickListener { dialog.dismiss() }
 
         val titleView = dialog.findViewById<android.widget.TextView>(R.id.top_title)
@@ -357,11 +364,6 @@ class AllSeriesFragment : BaseFragment<FragmentAllSeriesBinding>(), OnBackPresse
             }
         }
         dialog.show()
-        DialogWindowFit.apply(
-            dialog.window, requireContext(),
-            resources.getDimensionPixelSize(R.dimen.px800),
-            resources.getDimensionPixelSize(R.dimen.px615)
-        )
     }
 
     private fun showInfo(imageRes: Int, message: String) {

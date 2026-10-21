@@ -7,8 +7,12 @@ import com.mytvb.core.common.log.AppLog
 import com.mytvb.core.common.log.HomeVideoCardDebugLogger
 import com.mytvb.model.video.VideoModel
 import com.mytvb.network.api.BiliApi
+import com.mytvb.network.NetworkManager
 import com.mytvb.repository.cache.HomeCacheStore
-import kotlinx.coroutines.CompletableDeferred
+import com.mytvb.core.common.cache.OnDemandRequestCache
+import com.mytvb.core.common.coroutine.catchingRequest
+import com.mytvb.network.session.RequestSessionScope
+import com.mytvb.network.session.RequestSessionSnapshot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -25,16 +29,15 @@ class RecommendFeedRepository(
         private const val PRELOAD_PAGE_SIZE = 24
     }
 
-    private val firstPageLock = Any()
+    private data class FirstPageKey(val session: RequestSessionSnapshot, val pageSize: Int)
+    private val firstPages = OnDemandRequestCache<FirstPageKey, NetworkPage>(2, 0)
     @Volatile
-    private var firstPageInFlight: CompletableDeferred<NetworkPage>? = null
-    @Volatile
-    private var preloadedFirstPage: NetworkPage? = null
+    private var preloadedFirstPage: Pair<RequestSessionSnapshot, NetworkPage>? = null
 
     suspend fun preloadFirstPage() {
         val startMs = SystemClock.elapsedRealtime()
         AppLog.i(TAG, "STARTUP T2 preloadFirstPage start")
-        runCatching {
+        catchingRequest {
             loadSharedFirstPage(pageSize = PRELOAD_PAGE_SIZE, reason = "preload")
         }.onSuccess { page ->
             AppLog.i(TAG, "STARTUP T3 preload api done items=${page.items.size} hasMore=${page.hasMore}")
@@ -49,53 +52,15 @@ class RecommendFeedRepository(
         pageSize: Int = PRELOAD_PAGE_SIZE,
         reason: String
     ): NetworkPage {
-        preloadedFirstPage?.let { page ->
-            AppLog.i(TAG, "STARTUP sharedFirstPage hit reason=$reason items=${page.items.size}")
-            return page
-        }
-
-        var owner = false
-        val deferred = synchronized(firstPageLock) {
-            preloadedFirstPage?.let { page ->
-                CompletableDeferred(page)
-            } ?: firstPageInFlight ?: CompletableDeferred<NetworkPage>().also { created ->
-                firstPageInFlight = created
-                owner = true
+        ensureDataRuntimeReady("sharedFirstPage/$reason")
+        val session = RequestSessionScope.capture()
+        preloadedFirstPage?.takeIf { it.first == session }?.let { return it.second }
+        return firstPages.getOrLoad(FirstPageKey(session, pageSize)) {
+            loadNetworkPage(1, pageSize, 1, 1).getOrThrow().also { page ->
+                RequestSessionScope.requireCurrent(session)
+                preloadedFirstPage = session to page
             }
-        }
-
-        if (!owner) {
-            val waitStartMs = SystemClock.elapsedRealtime()
-            AppLog.i(TAG, "STARTUP sharedFirstPage await reason=$reason")
-            return deferred.await().also { page ->
-                AppLog.i(
-                    TAG,
-                    "STARTUP sharedFirstPage await_done reason=$reason elapsed=${SystemClock.elapsedRealtime() - waitStartMs}ms items=${page.items.size}"
-                )
-            }
-        }
-
-        val startMs = SystemClock.elapsedRealtime()
-        AppLog.i(TAG, "STARTUP sharedFirstPage owner reason=$reason")
-        return try {
-            ensureDataRuntimeReady("sharedFirstPage/$reason")
-            val page = loadNetworkPage(page = 1, pageSize = pageSize, freshIdx = 1, fetchRow = 1).getOrThrow()
-            preloadedFirstPage = page
-            deferred.complete(page)
-            AppLog.i(
-                TAG,
-                "STARTUP sharedFirstPage owner_done reason=$reason elapsed=${SystemClock.elapsedRealtime() - startMs}ms items=${page.items.size}"
-            )
-            page
-        } catch (throwable: Throwable) {
-            deferred.completeExceptionally(throwable)
-            synchronized(firstPageLock) {
-                if (firstPageInFlight === deferred) {
-                    firstPageInFlight = null
-                }
-            }
-            throw throwable
-        }
+        }.also { RequestSessionScope.requireCurrent(session) }
     }
 
     private suspend fun ensureDataRuntimeReady(reason: String) {
@@ -140,8 +105,79 @@ class RecommendFeedRepository(
         pageSize: Int,
         freshIdx: Int,
         fetchRow: Int
-    ): Result<NetworkPage> = runCatching {
-        loadWebFeedPage(page, pageSize, freshIdx, fetchRow)
+    ): Result<NetworkPage> = catchingRequest {
+        loadAppFeedPageIfAvailable(pageSize, freshIdx, fetchRow)
+            ?: loadWebFeedPage(page, pageSize, freshIdx, fetchRow)
+    }
+
+    /**
+     * 供播放页抖音队列复用：按「首页推荐来源」设置取一页推荐，返回纯列表。
+     * 与首页完全同源（APP 端流失败自动回退网页端 V8），保证上下滑切换的内容
+     * 和用户在首页看到的推荐流一致，而不是另走一条无签名的旧接口。
+     */
+    suspend fun loadFeedPageForQueue(
+        pageSize: Int,
+        freshIdx: Int,
+        fetchRow: Int
+    ): List<VideoModel> {
+        val page = loadNetworkPage(
+            page = 1,
+            pageSize = pageSize,
+            freshIdx = freshIdx,
+            fetchRow = fetchRow
+        ).getOrElse { throwable ->
+            AppLog.w(TAG, "loadFeedPageForQueue failed freshIdx=$freshIdx: ${throwable.message}")
+            return emptyList()
+        }
+        return page.items
+    }
+
+    /**
+     * 已登录（有 app access_token）时优先走 app 端推荐流；接口失败或解析为空返回 null，
+     * 由调用方回退 web 流。app 流内容按 app 账号个性化，与 web 推荐池不同源。
+     */
+    private suspend fun loadAppFeedPageIfAvailable(
+        pageSize: Int,
+        freshIdx: Int,
+        fetchRow: Int
+    ): NetworkPage? {
+        if (!FeedSourceSetting.isAppSource(FeedSourceSetting.KEY_HOME_FEED_SOURCE)) {
+            AppLog.i(TAG, "appFeed disabled by setting, use web feed")
+            return null
+        }
+        val accessKey = NetworkManager.getAppAccessToken()
+        if (accessKey.isBlank()) {
+            AppLog.i(TAG, "appFeed skip: no access_token, use web feed")
+            return null
+        }
+        // app 流 idx 从 0 计（0=刷新），web freshIdx 从 1 计
+        val idx = (freshIdx - 1).coerceAtLeast(0)
+        return try {
+            val t0 = SystemClock.elapsedRealtime()
+            val result = BiliApi.appRecommend(idx = idx, accessKey = accessKey, ps = pageSize)
+            val filtered = result.items.filter { it.isSupportedHomeVideoCard }
+            if (filtered.isEmpty()) {
+                AppLog.w(TAG, "appFeed empty raw=${result.rawCount}, fallback web")
+                null
+            } else {
+                AppLog.i(
+                    TAG,
+                    "appFeed ok idx=$idx raw=${result.rawCount} filtered=${filtered.size} elapsed=${SystemClock.elapsedRealtime() - t0}ms"
+                )
+                NetworkPage(
+                    items = filtered,
+                    hasMore = true,
+                    rawCount = result.rawCount,
+                    requestFreshIdx = freshIdx,
+                    requestFetchRow = fetchRow,
+                    source = result.source
+                )
+            }
+        } catch (throwable: Throwable) {
+            if (throwable is kotlinx.coroutines.CancellationException) throw throwable
+            AppLog.w(TAG, "appFeed failed: ${throwable.message}, fallback web")
+            null
+        }
     }
 
     /**
@@ -152,7 +188,7 @@ class RecommendFeedRepository(
     fun updatePreloadedFirstPage(page: NetworkPage) {
         if (page.items.isEmpty()) return
         AppLog.i(TAG, "updatePreloadedFirstPage items=${page.items.size} source=${page.source}")
-        preloadedFirstPage = page
+        preloadedFirstPage = RequestSessionScope.capture() to page
     }
 
     private suspend fun loadWebFeedPage(
@@ -163,7 +199,7 @@ class RecommendFeedRepository(
     ): NetworkPage {
         val t0 = SystemClock.elapsedRealtime()
         val source = "recommend_v8(page=$page,freshIdx=$freshIdx,fetchRow=$fetchRow,ps=$pageSize)"
-        val recommendResult = runCatching {
+        val recommendResult = catchingRequest {
             BiliApi.recommendV8(freshIdx = freshIdx, ps = pageSize, fetchRow = fetchRow)
         }.getOrElse { throwable ->
             AppLog.w(TAG, "$source failed: ${throwable.message}; fallback V1")

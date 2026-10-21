@@ -2,6 +2,7 @@ package com.mytvb.feature.player
 
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
@@ -9,7 +10,7 @@ import android.view.animation.Animation
 import android.view.animation.AnimationUtils
 import android.widget.LinearLayout
 import android.widget.TextView
-import android.widget.Toast
+
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatDialog
 import androidx.core.content.ContextCompat
@@ -34,7 +35,9 @@ import com.mytvb.core.ui.base.VideoRecyclerViewTuning
 import com.mytvb.core.ui.layout.WrapContentGridLayoutManager
 import com.mytvb.feature.player.comment.CommentPanelDialog
 import com.mytvb.feature.player.view.MyPlayerView
+import com.mytvb.model.player.ViewPoint
 import com.mytvb.core.ui.base.DialogWindowFit
+import com.mytvb.core.ui.base.AppToast
 
 @UnstableApi
 class VideoPlayerOverlayController(
@@ -64,7 +67,7 @@ class VideoPlayerOverlayController(
         val episodes = sessionCoordinator.getEpisodes()
         val selectedEpisodeIndex = sessionCoordinator.getSelectedEpisodeIndex()
         if (episodes.isEmpty()) {
-            Toast.makeText(activity, activity.getString(R.string.player_no_episodes_toast), Toast.LENGTH_SHORT).show()
+            AppToast.show(activity, activity.getString(R.string.player_no_episodes_toast))
             return
         }
         if (episodes.firstOrNull()?.source == VideoPlayerViewModel.EpisodeCatalogSource.UGC_SEASON) {
@@ -76,8 +79,15 @@ class VideoPlayerOverlayController(
         uiCoordinator.transition(UiEvent.PanelOpened(PanelType.EPISODE))
 
         val dialog = AppCompatDialog(activity, R.style.DialogTheme)
-        dialog.setContentView(R.layout.dialog_choose_episode)
         dialog.setCanceledOnTouchOutside(true)
+        // 固定尺寸卡片（布局根 match_parent 依赖窗口定尺寸），fill 载体下显式传高
+        DialogWindowFit.overlay(
+            dialog,
+            LayoutInflater.from(activity).inflate(R.layout.dialog_choose_episode, null),
+            activity.resources.getDimensionPixelSize(R.dimen.px1000),
+            heightPx = activity.resources.getDimensionPixelSize(R.dimen.px615),
+            tag = "episode"
+        )
 
         val recyclerView = dialog.findViewById<RecyclerView>(R.id.recyclerView)
         val titleView = dialog.findViewById<TextView>(R.id.top_title)
@@ -150,11 +160,86 @@ class VideoPlayerOverlayController(
             }
         }
         dialog.show()
-        DialogWindowFit.apply(
-            dialog.window, activity,
-            activity.resources.getDimensionPixelSize(R.dimen.px1000),
-            activity.resources.getDimensionPixelSize(R.dimen.px615)
+    }
+
+    /**
+     * 章节面板（view_points）：缩略图+标题+时间范围单列列表，点击直接 seek 到章节
+     * 起点；打开时定位并聚焦当前章。弹出/关闭协议与选集面板一致。
+     */
+    fun showChapterDialog(
+        viewPoints: List<ViewPoint>,
+        currentPositionMs: Long,
+        onSeek: (Long) -> Unit
+    ) {
+        if (viewPoints.isEmpty()) return
+        overlayCoordinator.rememberFocusRestoreTarget(PlayerOverlayCoordinator.FocusTarget.CHAPTER_BUTTON)
+        keepControllerVisibleForOverlay()
+        uiCoordinator.transition(UiEvent.PanelOpened(PanelType.CHAPTER))
+
+        val currentIndex = viewPoints.indexOfLast { currentPositionMs >= it.fromMs }.coerceAtLeast(0)
+        val dialog = AppCompatDialog(activity, R.style.DialogTheme)
+        dialog.setCanceledOnTouchOutside(true)
+        DialogWindowFit.overlay(
+            dialog,
+            LayoutInflater.from(activity).inflate(R.layout.dialog_chapter_list, null),
+            activity.resources.getDimensionPixelSize(R.dimen.px1100),
+            heightPx = activity.resources.getDimensionPixelSize(R.dimen.px700),
+            tag = "chapter"
         )
+
+        val recyclerView = dialog.findViewById<RecyclerView>(R.id.recyclerView)
+        val titleView = dialog.findViewById<TextView>(R.id.top_title)
+        titleView?.text = "${activity.getString(R.string.video_chapter)}(${currentIndex + 1}/${viewPoints.size})"
+        dialog.findViewById<View>(R.id.button_close)?.setOnClickListener { dialog.dismiss() }
+
+        val chapterAdapter = ChapterPanelAdapter { point ->
+            dialog.dismiss()
+            onSeek(point.fromMs)
+        }.apply {
+            submitList(viewPoints, currentIndex)
+        }
+        recyclerView?.apply {
+            layoutManager = LinearLayoutManager(activity)
+            adapter = chapterAdapter
+        }
+
+        dialog.window?.decorView?.viewTreeObserver?.addOnWindowFocusChangeListener(
+            object : ViewTreeObserver.OnWindowFocusChangeListener {
+                override fun onWindowFocusChanged(hasFocus: Boolean) {
+                    if (hasFocus) {
+                        recyclerView?.viewTreeObserver?.removeOnWindowFocusChangeListener(this)
+                        focusTargetChapter(recyclerView, currentIndex)
+                    }
+                }
+            }
+        )
+
+        dialog.setOnDismissListener {
+            uiCoordinator.transition(UiEvent.PanelClosed)
+            if (isViewActive()) {
+                restoreControllerAfterOverlay()
+            }
+        }
+        dialog.show()
+    }
+
+    /** 章节面板窗口获焦后的初始定位：优先同步聚焦当前章，未布局时 scrollToPosition+双 post 兜底。 */
+    private fun focusTargetChapter(recyclerView: RecyclerView?, targetIndex: Int) {
+        val rv = recyclerView ?: return
+        val holder = rv.findViewHolderForAdapterPosition(targetIndex)
+        if (holder?.itemView != null) {
+            holder.itemView.requestFocus()
+            return
+        }
+        if (targetIndex in 0 until (rv.adapter?.itemCount ?: 0)) {
+            rv.scrollToPosition(targetIndex)
+        }
+        rv.post {
+            rv.post {
+                val h = rv.findViewHolderForAdapterPosition(targetIndex)
+                h?.itemView?.requestFocus()
+            }
+        }
     }
 
     /**
@@ -191,9 +276,15 @@ class VideoPlayerOverlayController(
         ).also { seasonDialogRef = it }
         dialog.setCanceledOnTouchOutside(true)
         // 贴屏幕右侧、垂直居中；宽高由布局根节点固定（px600×px935），
-        // floating dialog 上 MATCH_PARENT 窗口高会退化为 wrap 内容，不能用
-        dialog.window?.setGravity(Gravity.END or Gravity.CENTER_VERTICAL)
-        dialog.setContentView(R.layout.dialog_choose_episode_season)
+        // 卡片经 fill 载体右侧对齐，自动钳 92% 屏高
+        DialogWindowFit.overlay(
+            dialog,
+            LayoutInflater.from(activity).inflate(R.layout.dialog_choose_episode_season, null),
+            activity.resources.getDimensionPixelSize(R.dimen.px600),
+            heightPx = activity.resources.getDimensionPixelSize(R.dimen.px935),
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL,
+            tag = "seasonEpisode"
+        )
 
         val titleView = dialog.findViewById<TextView>(R.id.top_title)
         val recyclerView = dialog.findViewById<RecyclerView>(R.id.recyclerView)
@@ -314,11 +405,6 @@ class VideoPlayerOverlayController(
             }
         }
         dialog.show()
-        DialogWindowFit.apply(
-            dialog.window, activity,
-            activity.resources.getDimensionPixelSize(R.dimen.px600),
-            activity.resources.getDimensionPixelSize(R.dimen.px935)
-        )
         // 布局完成后兜底设初始焦点；窗口焦点监听在部分路径（触摸唤起）下时机不稳
         recyclerView.post {
             if (dialog.isShowing) {
@@ -469,7 +555,7 @@ class VideoPlayerOverlayController(
     ) {
         val video = resolveCurrentVideoInfo()
         if (video == null) {
-            Toast.makeText(activity, activity.getString(R.string.player_video_info_not_loaded), Toast.LENGTH_SHORT).show()
+            AppToast.show(activity, activity.getString(R.string.player_video_info_not_loaded))
             return
         }
         if (restorePlayerFocus) {
@@ -552,7 +638,7 @@ class VideoPlayerOverlayController(
         val aid = view?.aid ?: 0L
         val bvid = view?.bvid.orEmpty()
         if (aid <= 0L && bvid.isBlank()) {
-            Toast.makeText(activity, activity.getString(R.string.player_video_info_not_loaded), Toast.LENGTH_SHORT).show()
+            AppToast.show(activity, activity.getString(R.string.player_video_info_not_loaded))
             return
         }
         overlayCoordinator.rememberFocusRestoreTarget(PlayerOverlayCoordinator.FocusTarget.MORE_BUTTON)
@@ -578,7 +664,7 @@ class VideoPlayerOverlayController(
         val view = latestVideoInfoProvider()?.view
         val owner = view?.owner
         if (owner == null || owner.mid <= 0L) {
-            Toast.makeText(activity, activity.getString(R.string.player_up_info_not_loaded), Toast.LENGTH_SHORT).show()
+            AppToast.show(activity, activity.getString(R.string.player_up_info_not_loaded))
             return
         }
         overlayCoordinator.rememberFocusRestoreTarget(PlayerOverlayCoordinator.FocusTarget.OWNER_BUTTON)
@@ -593,7 +679,8 @@ class VideoPlayerOverlayController(
                 onPlayRelatedVideo(video, playQueue)
             },
             currentAid = view.aid,
-            currentVideoId = view.bvid
+            currentVideoId = view.bvid,
+            currentSeasonId = view.ugcSeason?.id ?: 0L
         ).apply {
             setOnDismissListener {
                 uiCoordinator.transition(UiEvent.PanelClosed)
@@ -608,7 +695,7 @@ class VideoPlayerOverlayController(
     fun showCommentPanel() {
         val video = resolveCurrentVideoInfo()
         if (video == null || video.aid <= 0L) {
-            Toast.makeText(activity, activity.getString(R.string.player_video_info_not_loaded), Toast.LENGTH_SHORT).show()
+            AppToast.show(activity, activity.getString(R.string.player_video_info_not_loaded))
             return
         }
         overlayCoordinator.rememberFocusRestoreTarget(PlayerOverlayCoordinator.FocusTarget.COMMENT_BUTTON)

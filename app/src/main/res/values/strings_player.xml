@@ -43,6 +43,7 @@
 
     <!-- 播放器：空降助手（跳过片段） -->
     <string name="player_skip_segment_toast_format">已跳过：%1$s</string>
+    <string name="player_mute_segment_toast_format">已静音：%1$s</string>
     <string name="player_sponsor_category_sponsor">赞助/恰饭</string>
     <string name="player_sponsor_category_intro">过场/开场动画</string>
     <string name="player_sponsor_category_outro">鸣谢/结束画面</string>
@@ -97,6 +98,9 @@
     <string name="series_error_timeline_failed">时间线加载失败</string>
     <string name="series_error_recommend_failed">推荐加载失败</string>
     <string name="player_hdr_unsupported_hint">电视或播放设备可能不支持「%1$s」，若播放异常请切回其他画质</string>
+
+    <!-- 同时观看人数 / Online watching count -->
+    <string name="online_watching_format">%1$s人正在看</string>
 
     <!-- 视频评论 / Video comments -->
     <string name="player_comment_title">评论</string>

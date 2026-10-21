@@ -51,6 +51,9 @@ class PersonalFeedPrewarmer(
     private var foldersResult: BaseResponse<FavoriteFoldersWrapper>? = null
     private var foldersInFlight: CompletableDeferred<BaseResponse<FavoriteFoldersWrapper>?>? = null
 
+    /** 播放敏感数据的代次：进入播放会话即 +1，预取结果发起时的代次不一致则作废不写回。 */
+    private var playbackSensitiveEpoch = 0
+
     var prewarmStarted = false
         private set
 
@@ -74,14 +77,20 @@ class PersonalFeedPrewarmer(
 
     private suspend fun prewarmHistory() {
         val deferred = CompletableDeferred<BaseResponse<HistoryListResponse>?>()
-        synchronized(lock) { historyInFlight = deferred }
+        val requestEpoch = synchronized(lock) {
+            historyInFlight = deferred
+            playbackSensitiveEpoch
+        }
         val startMs = SystemClock.elapsedRealtime()
         val response = runCatching {
             userRepository.getHistory(0L, HISTORY_PAGE_SIZE).getOrNull()
         }.getOrNull()
         AppLog.i(TAG, "prewarm history done elapsed=${SystemClock.elapsedRealtime() - startMs}ms code=${response?.code}")
         synchronized(lock) {
-            historyResult = response
+            // 请求期间用户进过播放器则作废：这份快照发起于播放前，写回会把新进度顶掉
+            if (requestEpoch == playbackSensitiveEpoch) {
+                historyResult = response
+            }
             historyInFlight = null
         }
         deferred.complete(response)
@@ -89,14 +98,19 @@ class PersonalFeedPrewarmer(
 
     private suspend fun prewarmLater() {
         val deferred = CompletableDeferred<BaseResponse<LaterWatchWrapper>?>()
-        synchronized(lock) { laterInFlight = deferred }
+        val requestEpoch = synchronized(lock) {
+            laterInFlight = deferred
+            playbackSensitiveEpoch
+        }
         val startMs = SystemClock.elapsedRealtime()
         val response = runCatching {
             userRepository.getLaterWatch().getOrNull()
         }.getOrNull()
         AppLog.i(TAG, "prewarm later done elapsed=${SystemClock.elapsedRealtime() - startMs}ms code=${response?.code}")
         synchronized(lock) {
-            laterResult = response
+            if (requestEpoch == playbackSensitiveEpoch) {
+                laterResult = response
+            }
             laterInFlight = null
         }
         deferred.complete(response)
@@ -122,6 +136,25 @@ class PersonalFeedPrewarmer(
             foldersInFlight = null
         }
         deferred.complete(response)
+    }
+
+    /**
+     * 进入播放会话时作废历史/稍后观看的预取缓存：播放必然推进服务端历史（viewAt/进度，
+     * 稍后观看里的视频看完还会被服务端移除），启动时抓的快照已过期，命中它会把新数据
+     * 顶回旧的（表现为"看完视频进历史列表不刷新"）。收藏夹列表不受播放影响，保留。
+     */
+    fun invalidatePlaybackSensitiveCache() {
+        synchronized(lock) {
+            playbackSensitiveEpoch++
+            historyResult = null
+            laterResult = null
+            // in-flight 直接以 null 收尾：正在 await 的消费方拿到 null 后自行走正常网络
+            historyInFlight?.complete(null)
+            historyInFlight = null
+            laterInFlight?.complete(null)
+            laterInFlight = null
+            AppLog.i(TAG, "invalidate playback-sensitive prewarm cache")
+        }
     }
 
     /** 命中预取的历史首页；未命中（未预取/失败/超时）返回 null，调用方走正常网络。 */

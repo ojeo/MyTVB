@@ -4,7 +4,7 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Toast
+
 import androidx.core.os.bundleOf
 import androidx.core.view.isVisible
 import androidx.lifecycle.Lifecycle
@@ -35,6 +35,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import org.koin.android.ext.android.inject
+import com.mytvb.core.ui.base.AppToast
 
 class FavoriteDetailFragment : BaseFragment<FragmentFavoriteDetailBinding>() {
 
@@ -71,6 +72,8 @@ class FavoriteDetailFragment : BaseFragment<FragmentFavoriteDetailBinding>() {
     private var videosLoadJob: Job? = null
     private var videosRequestSerial = 0
     private var activeVideosRequestId = 0
+    private var pendingSilentReturn = false
+    private var silentRefreshJob: Job? = null
 
     override fun getViewBinding(inflater: LayoutInflater, container: ViewGroup?): FragmentFavoriteDetailBinding {
         return FragmentFavoriteDetailBinding.inflate(inflater, container, false)
@@ -90,6 +93,7 @@ class FavoriteDetailFragment : BaseFragment<FragmentFavoriteDetailBinding>() {
                 if (video.aid != 0L || video.bvid.isNotEmpty()) {
                     lastFocusedPosition = favoriteAdapter.getFocusedPosition()
                     pendingRestoreFocus = true
+                    pendingSilentReturn = true
                     tvFocusController?.captureCurrentAnchor()
                     VideoRouteNavigator.openHistory(
                         context = requireContext(),
@@ -166,6 +170,79 @@ class FavoriteDetailFragment : BaseFragment<FragmentFavoriteDetailBinding>() {
         if (pendingRestoreFocus) {
             pendingRestoreFocus = false
             restoreFocus()
+        }
+        if (pendingSilentReturn && favoriteAdapter.itemCount > 0 && !isLoading) {
+            // 从播放器返回：静默重拉第一页按 key 保序合并，只更新被看过卡片的进度
+            pendingSilentReturn = false
+            silentRefreshFavoriteProgress()
+        }
+    }
+
+    /**
+     * 静默刷新观看进度（从播放器返回时调用），对齐历史页 silentRefreshHistoryProgress：
+     * 重拉第一页后按 itemKey 保序合并进现有列表——只覆盖匹配项的进度等字段，
+     * 顺序不变、不增不删（不回顶不动焦点，Diff 只刷变化的卡片）。失败静默吞。
+     */
+    private fun silentRefreshFavoriteProgress() {
+        if (folderId == 0L) return
+        if (favoriteAdapter.itemCount == 0) return
+        if (isLoading) return
+        silentRefreshJob?.cancel()
+        silentRefreshJob = lifecycleScope.launch {
+            try {
+                val t0 = System.currentTimeMillis()
+                AppLog.d("FavDetail", "silentRefreshFavorite: request first page")
+                val result = favoriteRepository.getFavoriteFolderDetail(folderId, 1, 20)
+                // 期间正常加载已启动则丢弃，正常加载的结果更权威
+                if (isLoading) {
+                    AppLog.d("FavDetail", "silentRefreshFavorite: drop, normal load took over")
+                    return@launch
+                }
+                val freshMedias = result.getOrNull()?.data?.medias.orEmpty()
+                val progressSample = freshMedias.take(6).joinToString(",") {
+                    "${it.bvid.takeLast(8)}:${it.progress}s/${it.duration}s"
+                }
+                AppLog.d("FavDetail", "silentRefreshFavorite: fresh progress sample=[$progressSample]")
+                result.onSuccess { response ->
+                    if (!response.isSuccess) {
+                        AppLog.e("FavDetail", "silentRefreshFavorite: code=${response.code}")
+                        return@onSuccess
+                    }
+                    val freshByKey = response.data?.medias.orEmpty()
+                        .associateBy(::favoriteItemKey)
+                    if (freshByKey.isEmpty()) {
+                        AppLog.d("FavDetail", "silentRefreshFavorite: drop, empty first page")
+                        return@onSuccess
+                    }
+                    val current = favoriteAdapter.getItemsSnapshot()
+                    if (current.isEmpty()) return@onSuccess
+                    val merged = current.map { freshByKey[favoriteItemKey(it)] ?: it }
+                    if (merged == current) {
+                        AppLog.d("FavDetail", "silentRefreshFavorite: no diff, items=${merged.size}, cost=${System.currentTimeMillis() - t0}ms")
+                        return@onSuccess
+                    }
+                    val changed = merged.zip(current).count { (new, old) -> new != old }
+                    AppLog.d("FavDetail", "silentRefreshFavorite: applied, items=${merged.size}, changed=$changed, cost=${System.currentTimeMillis() - t0}ms")
+                    favoriteAdapter.setData(merged)
+                    tvFocusController?.onDataChanged(TvDataChangeReason.REPLACE_PRESERVE_ANCHOR)
+                }.onFailure { e ->
+                    if (e is CancellationException) {
+                        throw e
+                    }
+                    AppLog.e("FavDetail", "silentRefreshFavorite: failed, ${e.message}")
+                }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                AppLog.e("FavDetail", "silentRefreshFavorite: failed, ${t.message}")
+            }
+        }
+    }
+
+    private fun favoriteItemKey(item: com.mytvb.model.video.HistoryVideoModel): String {
+        return when {
+            item.bvid.isNotBlank() -> "bvid:${item.bvid}"
+            (item.history?.oid ?: 0L) > 0L -> "aid:${item.history?.oid}"
+            else -> "title:${item.title}|cover:${item.cover}"
         }
     }
 
@@ -328,7 +405,7 @@ class FavoriteDetailFragment : BaseFragment<FragmentFavoriteDetailBinding>() {
             return
         }
         showListContent()
-        Toast.makeText(requireContext(), message, Toast.LENGTH_SHORT).show()
+        AppToast.show(requireContext(), message)
     }
 
     private fun rollbackPage() {

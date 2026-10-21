@@ -178,6 +178,55 @@ fun TabLayout.enableTouchNavigation(
     }
 }
 
+/**
+ * 无 ViewPager 场景（如弹窗内单列表按 tab 切数据源）的轻量 tab 导航：
+ * 每个 tab 独立背景实例防串台、焦点/触摸文字提亮、DPAD 上下边界交给业务接管；
+ * 选中切换走 TabLayout 默认点击/OK 键行为，业务在 OnTabSelectedListener 里换数据。
+ */
+fun TabLayout.enableDirectTabNavigation(
+    onNavigateDown: (() -> Boolean)? = null,
+    onNavigateUp: (() -> Boolean)? = null,
+    onEdgeLeft: (() -> Boolean)? = null,
+    onEdgeRight: (() -> Boolean)? = null
+) {
+    // 立即同步装一遍再 post 补装（幂等）：只 post 的话 addTab 到下一帧之间存在窗口期，
+    // 此间按方向键会被 FocusFinder 几何搜索把焦点送到不可预期的位置
+    fun installToTabStrip() {
+        val tabStrip = getChildAt(0) as? ViewGroup ?: return
+        if (tabStrip.childCount == 0) return
+        for (index in 0 until tabStrip.childCount) {
+            val tabView = tabStrip.getChildAt(index)
+            tabView.isClickable = true
+            tabView.isFocusable = true
+            // 勿设 focusableInTouchMode：触摸模式下首次 tap 会只聚焦不点击（点两次才能切换 tab）；
+            // 遥控方向键按下时系统自动退出 touch mode，isFocusable 已足够支撑焦点导航
+            suppressLongPressTooltip(tabView)
+            applyTabBackground(tabView)
+            bindTabTouchTextColor(tabView)
+            bindTabFocusTextColor(tabView)
+            // tab 宽度随文字自适应的前提：文字永远单行（material 默认 maxLines=2，长合集名会换行被固定高度裁切）
+            findFirstTextView(tabView)?.setSingleLine(true)
+            tabView.setOnKeyListener { _, keyCode, event ->
+                if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+                when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_DOWN -> onNavigateDown?.invoke() ?: false
+                    KeyEvent.KEYCODE_DPAD_UP -> onNavigateUp?.invoke() ?: false
+                    // 首/末 tab 的越界左右键：回调接管去向；未提供回调则一律消费——
+                    // 放行会被 FocusFinder 几何搜索把焦点送到关注按钮等不可预期的位置
+                    KeyEvent.KEYCODE_DPAD_LEFT ->
+                        if (index == 0) onEdgeLeft?.invoke() ?: true else false
+                    KeyEvent.KEYCODE_DPAD_RIGHT ->
+                        if (index == tabStrip.childCount - 1) onEdgeRight?.invoke() ?: true else false
+                    else -> false
+                }
+            }
+        }
+        reapplyTextColorOnSelectionChange()
+    }
+    installToTabStrip()
+    post { installToTabStrip() }
+}
+
 fun TabLayout.focusSelectedTab(): Boolean {
     val selectedIndex = selectedTabPosition
     if (selectedIndex < 0) {

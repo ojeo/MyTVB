@@ -43,6 +43,7 @@
 
     <!-- 播放器：空降助手（跳過片段） -->
     <string name="player_skip_segment_toast_format">已跳過：%1$s</string>
+    <string name="player_mute_segment_toast_format">已靜音：%1$s</string>
     <string name="player_sponsor_category_sponsor">贊助/業配</string>
     <string name="player_sponsor_category_intro">過場/開場動畫</string>
     <string name="player_sponsor_category_outro">鳴謝/結束畫面</string>
@@ -95,6 +96,9 @@
     <string name="series_error_timeline_failed">時間軸載入失敗</string>
     <string name="series_error_recommend_failed">推薦載入失敗</string>
     <string name="player_hdr_unsupported_hint">電視或播放裝置可能不支援「%1$s」，若播放異常請切回其他畫質</string>
+
+    <!-- 同时观看人数 / Online watching count -->
+    <string name="online_watching_format">%1$s人正在看</string>
 
     <!-- 视频评论 / Video comments -->
     <string name="player_comment_title">評論</string>

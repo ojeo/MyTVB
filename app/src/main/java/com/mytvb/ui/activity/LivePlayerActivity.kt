@@ -3,7 +3,7 @@ package com.mytvb.ui.activity
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
-import android.widget.Toast
+
 import androidx.activity.OnBackPressedCallback
 import androidx.annotation.OptIn
 import androidx.fragment.app.commit
@@ -13,6 +13,7 @@ import com.mytvb.databinding.ActivityPlayerBinding
 import com.mytvb.core.ui.base.BaseActivity
 import com.mytvb.core.common.ext.toast
 import com.mytvb.feature.player.LivePlayerFragment
+import com.mytvb.core.ui.base.AppToast
 
 @OptIn(UnstableApi::class)
 class LivePlayerActivity : BaseActivity<ActivityPlayerBinding>() {
@@ -53,7 +54,7 @@ class LivePlayerActivity : BaseActivity<ActivityPlayerBinding>() {
                     finish()
                 } else {
                     exitTime = System.currentTimeMillis()
-                    Toast.makeText(applicationContext, R.string.activity_exit_player_hint, Toast.LENGTH_SHORT).show()
+                    AppToast.show(applicationContext, R.string.activity_exit_player_hint)
                 }
             }
         })

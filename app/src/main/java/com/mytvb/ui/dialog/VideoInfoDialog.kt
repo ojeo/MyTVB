@@ -20,12 +20,13 @@ class VideoInfoDialog(
 
     init {
         supportRequestWindowFeature(Window.FEATURE_NO_TITLE)
-        setContentView(binding.root)
         setCanceledOnTouchOutside(true)
-        DialogWindowFit.apply(
-            window, context,
+        // 固定尺寸卡片（布局根 match_parent 依赖窗口定尺寸），fill 载体下显式传高
+        DialogWindowFit.overlay(
+            this, binding.root,
             context.resources.getDimensionPixelSize(R.dimen.px1200),
-            context.resources.getDimensionPixelSize(R.dimen.px615)
+            heightPx = context.resources.getDimensionPixelSize(R.dimen.px615),
+            tag = "videoInfo"
         )
         bindContent()
         binding.buttonClose.setOnClickListener { dismiss() }

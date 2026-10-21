@@ -100,6 +100,8 @@
     <string name="model_series_variety">Variety shows</string>
     <string name="model_search_order_total_rank">Overall</string>
     <string name="model_search_order_click">Most viewed</string>
+    <string name="space_order_most_played">Most played</string>
+    <string name="space_sort_oldest_first">Oldest first</string>
     <string name="model_search_order_pub_date">Newest first</string>
     <string name="model_search_order_dm">Most danmaku</string>
     <string name="model_search_order_most_collection">Most favorited</string>
@@ -130,13 +132,6 @@
     <string name="x5_install_failed_code_format">Install failed (code %1$d), click to retry</string>
     <string name="x5_install_unsupported">canLoadX5 is still false after install; the device may be unsupported</string>
     <string name="x5_install_error_format">Install error: %1$s</string>
-
-    <!-- ===== debug: debug log page ===== -->
-    <string name="debug_export">Export</string>
-    <string name="debug_export_success">Exported</string>
-    <string name="debug_export_success_message_format">Log saved to:\n%1$s\n\nOpen this path in a file manager, or pull it via adb.</string>
-    <string name="debug_export_failed_format">Export failed: %1$s</string>
-    <string name="debug_got_it">Got it</string>
 
     <!-- ===== layout placeholders / titles ===== -->
     <string name="cell_title_placeholder">Title title title title title title title title title</string>

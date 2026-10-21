@@ -32,6 +32,10 @@ class LiveRepository(
     companion object {
         private const val TAG = "LiveRepository"
         private const val DEFAULT_LIVE_QN = 10000
+        // 与 LiveRecommendFragment.FOLLOW_SECTION_TITLE 同口径:服务端下发的关注模块标题
+        private const val FOLLOW_SECTION_TITLE = "我的关注"
+        // 关注直播全量接口单页 30 条,上限 4 页足够覆盖绝大多数关注数
+        private const val ATTENTION_MAX_PAGES = 4
         private const val DEFAULT_LIVE_PARENT_AREA_ID = 1L
         private const val DEFAULT_LIVE_AREA_ID = 1013L
         private const val WEB_LOCATION_LIVE_HOME = "444.7"
@@ -107,8 +111,46 @@ class LiveRepository(
 
     suspend fun getLiveRecommend(): Result<LiveListWrapper> {
         return runCatching {
-            com.mytvb.network.api.BiliApi.liveHomeList()
+            val home = com.mytvb.network.api.BiliApi.liveHomeList()
+            mergeAttentionRooms(home)
         }
+    }
+
+    /**
+     * index/getList 的「我的关注」模块服务端只下发约 6 条,这里用关注直播专用接口
+     * (GetAttentionListInfo)翻页拉全量替换该模块;关注接口失败或拉到空列表时
+     * 保留首页模块原始数据,不影响页面可用性。
+     */
+    private suspend fun mergeAttentionRooms(home: LiveListWrapper): LiveListWrapper {
+        val roomList = home.roomList ?: return home
+        val followIndex = roomList.indexOfFirst {
+            it.moduleInfo?.title.orEmpty().contains(FOLLOW_SECTION_TITLE)
+        }
+        if (followIndex < 0) return home
+
+        val allItems = mutableListOf<LiveRoomItem>()
+        val t0 = System.currentTimeMillis()
+        runCatching {
+            var page = 1
+            while (page <= ATTENTION_MAX_PAGES) {
+                val (count, items) = com.mytvb.network.api.BiliApi.attentionLiveList(page)
+                allItems += items
+                if (items.isEmpty() || allItems.size >= count) break
+                page++
+            }
+        }.onFailure {
+            AppLog.w(TAG, "关注直播全量接口失败,保留首页模块数据: ${it.message}")
+        }
+        if (allItems.isEmpty()) return home
+
+        AppLog.i(
+            TAG,
+            "关注模块全量替换: 首页下发=${roomList[followIndex].list?.size ?: 0} 全量=${allItems.size} " +
+                "耗时=${System.currentTimeMillis() - t0}ms"
+        )
+        val newRoomList = roomList.toMutableList()
+        newRoomList[followIndex] = newRoomList[followIndex].copy(list = allItems)
+        return home.copy(roomList = newRoomList)
     }
 
     suspend fun getAreaLive(

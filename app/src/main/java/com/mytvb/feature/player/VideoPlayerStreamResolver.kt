@@ -25,7 +25,13 @@ import kotlin.math.roundToLong
 @OptIn(UnstableApi::class)
 internal class VideoPlayerStreamResolver(
     private val dataSourceFactory: DataSource.Factory,
-    private val urlNormalizer: (String) -> String
+    private val urlNormalizer: (String) -> String,
+    /**
+     * 起播能力预检（与播放选择器同语义的 supportsFormat 判定）：
+     * 判定"本机声明不可解码"的编码会在候选列表中被稳定后置（不剔除），
+     * 避免"选流判可解、播放却开不起来"。默认放行（不影响未接线场景）。
+     */
+    private val isCodecDecodable: (DashVideo) -> Boolean = { true }
 ) {
 
     companion object {
@@ -115,10 +121,13 @@ internal class VideoPlayerStreamResolver(
         }
 
         val videosByCodec = videosAtQuality.groupBy { VideoCodecEnum.fromId(it.codecId) }
-        val codecOrder = orderCodecs(
-            available = videosByCodec.keys,
-            preferredCodec = preferredCodec,
-            hardwareSupportedCodecs = hardwareSupportedCodecs
+        val codecOrder = reorderUndecodableLast(
+            codecs = orderCodecs(
+                available = videosByCodec.keys,
+                preferredCodec = preferredCodec,
+                hardwareSupportedCodecs = hardwareSupportedCodecs
+            ),
+            videos = videosAtQuality
         )
         val routes = codecOrder.mapNotNull { codec ->
             val selectedVideo = videosByCodec[codec]
@@ -363,11 +372,36 @@ internal class VideoPlayerStreamResolver(
         val availableCodecs = filteredVideos
             .map { VideoCodecEnum.fromId(it.codecId) }
             .distinct()
-        return VideoCodecSupport.orderCandidates(
+        val ordered = VideoCodecSupport.orderCandidates(
             availableCodecs = availableCodecs,
             preferredCodec = preferredCodec,
             hardwareSupportedCodecs = hardwareSupportedCodecs
         )
+        return reorderUndecodableLast(ordered, filteredVideos)
+    }
+
+    /**
+     * 起播能力预检（保守）：判定本机不可解码的编码稳定后置（不剔除——预检查询异常时
+     * 视为可解码，运行时渲染器仍有最终判定与错误回退）。同档多流时按最高带宽取代表流。
+     */
+    private fun reorderUndecodableLast(
+        codecs: List<VideoCodecEnum>,
+        videos: List<DashVideo>
+    ): List<VideoCodecEnum> {
+        if (codecs.size <= 1) return codecs
+        val representativeByCodec = videos
+            .groupBy { VideoCodecEnum.fromId(it.codecId) }
+            .mapValues { (_, streams) -> streams.maxByOrNull { it.bandwidth } }
+        val (decodable, undecodable) = codecs.partition { codec ->
+            val track = representativeByCodec[codec] ?: return@partition true
+            isCodecDecodable(track)
+        }
+        if (undecodable.isEmpty()) return codecs
+        AppLog.i(
+            TAG,
+            "codec capability precheck: undecodable-last applied, decodable=$decodable undecodable=$undecodable"
+        )
+        return decodable + undecodable
     }
 
     fun buildMediaSource(
@@ -502,10 +536,13 @@ internal class VideoPlayerStreamResolver(
             .orEmpty()
 
         val videosByCodec = videosAtQuality.groupBy { VideoCodecEnum.fromId(it.codecId) }
-        val codecOrder = orderCodecs(
-            available = videosByCodec.keys,
-            preferredCodec = preferredCodec,
-            hardwareSupportedCodecs = hardwareSupportedCodecs
+        val codecOrder = reorderUndecodableLast(
+            codecs = orderCodecs(
+                available = videosByCodec.keys,
+                preferredCodec = preferredCodec,
+                hardwareSupportedCodecs = hardwareSupportedCodecs
+            ),
+            videos = videosAtQuality
         )
         val routes = codecOrder.mapNotNull { codec ->
             val selectedVideo = videosByCodec[codec]

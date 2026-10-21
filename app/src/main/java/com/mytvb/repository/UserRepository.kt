@@ -10,6 +10,8 @@ import com.mytvb.model.video.HistoryListResponse
 import com.mytvb.model.video.LaterWatchWrapper
 import com.mytvb.model.video.UserDynamicResponse
 import com.mytvb.model.video.AllDynamicResponse
+import com.mytvb.model.series.SeasonArchivesResponse
+import com.mytvb.model.series.SeasonsSeriesListResponse
 import com.mytvb.network.WbiGenerator
 import com.mytvb.network.api.ApiService
 import com.mytvb.network.security.NetworkSecurityGateway
@@ -63,7 +65,9 @@ class UserRepository(
     )
 
     suspend fun getUserDetailInfo(): BaseResponse<UserDetailInfoModel> {
+        val requestSession = com.mytvb.network.session.RequestSessionScope.capture()
         return apiService.getUserDetailInfo().also { response ->
+            com.mytvb.network.session.RequestSessionScope.requireCurrent(requestSession)
             sessionGateway.syncUserSession(response, source = "getUserDetailInfo")
         }
     }
@@ -216,7 +220,8 @@ class UserRepository(
     suspend fun getUserDynamic(
         mid: Long,
         page: Int,
-        pageSize: Int = 20
+        pageSize: Int = 20,
+        order: String = "pubdate"
     ): Result<BaseResponse<UserDynamicResponse>> =
         runCatching {
             if (isLoggedIn()) {
@@ -224,7 +229,7 @@ class UserRepository(
                     "mid" to mid.toString(),
                     "pn" to page.toString(),
                     "ps" to pageSize.toString(),
-                    "order" to "pubdate",
+                    "order" to order,
                     "platform" to "web",
                     "web_location" to "333.1387",
                     "order_avoided" to "true",
@@ -237,7 +242,7 @@ class UserRepository(
                     )
                 }
             } else {
-                apiService.getUserDynamic(mid, page, pageSize)
+                apiService.getUserDynamic(mid, page, pageSize, order)
             }
         }
 
@@ -252,9 +257,62 @@ class UserRepository(
             )
         }
 
-    suspend fun refreshCurrentUserInfo(): Result<UserDetailInfoModel> =
+    suspend fun getSeasonsSeriesList(
+        mid: Long,
+        pageNum: Int = 1,
+        // 实测该接口 page_size 上限 20，>20 返回 -400（网页版用 10/20）
+        pageSize: Int = 20
+    ): Result<BaseResponse<SeasonsSeriesListResponse>> =
         runCatching {
+            // 网页版新版接口（home/seasons_series）无需 WBI 签名；老 seasons_series_list 已实测 -400。
+            // Referer 必须是空间页，HeaderInterceptor 对 web-space 路径统一处理。
+            sessionGateway.syncAuthState(
+                apiService.getSeasonsSeriesList(
+                    mapOf(
+                        "mid" to mid.toString(),
+                        "page_num" to pageNum.toString(),
+                        "page_size" to pageSize.toString(),
+                        "web_location" to "333.1387"
+                    )
+                ),
+                source = "getSeasonsSeriesList"
+            )
+        }
+
+    suspend fun getSeriesArchives(
+        mid: Long,
+        seriesId: Long,
+        page: Int,
+        pageSize: Int = 20,
+        sortDesc: Boolean = true
+    ): Result<BaseResponse<UserDynamicResponse>> =
+        runCatching {
+            sessionGateway.syncAuthState(
+                apiService.getSeriesArchives(mid, seriesId, page, pageSize, if (sortDesc) "desc" else "asc"),
+                source = "getSeriesArchives"
+            )
+        }
+
+    suspend fun getSeasonArchives(
+        mid: Long,
+        seasonId: Long,
+        page: Int,
+        pageSize: Int = 20,
+        sortDesc: Boolean = true
+    ): Result<BaseResponse<SeasonArchivesResponse>> =
+        runCatching {
+            sessionGateway.syncAuthState(
+                // sort_reverse 语义：true=倒序（最新在前），false=正序（最老在前，合集默认从第1集开始）
+                apiService.getSeasonArchives(mid, seasonId, page = page, pageSize = pageSize, sortReverse = sortDesc),
+                source = "getSeasonArchives"
+            )
+        }
+
+    suspend fun refreshCurrentUserInfo(): Result<UserDetailInfoModel> =
+        com.mytvb.core.common.coroutine.catchingRequest {
+            val requestSession = com.mytvb.network.session.RequestSessionScope.capture()
             val response = apiService.getUserDetailInfo()
+            com.mytvb.network.session.RequestSessionScope.requireCurrent(requestSession)
             val info = sessionGateway.syncUserSession(
                 response,
                 source = "refreshCurrentUserInfo"

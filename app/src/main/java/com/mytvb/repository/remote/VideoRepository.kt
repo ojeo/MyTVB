@@ -1,5 +1,6 @@
 package com.mytvb.repository.remote
 
+import com.mytvb.core.common.coroutine.catchingRequest
 import com.mytvb.model.BaseResponse
 import com.mytvb.model.common.ArchiveRelationModel
 import com.mytvb.model.common.CheckGiveCoinModel
@@ -51,7 +52,7 @@ class VideoRepository(
         freshIdx: Int,
         pageSize: Int
     ): Result<BaseResponse<RecommendListDataModel<VideoModel>>> =
-        runCatching {
+        catchingRequest {
             apiService.getRecommendList(
                 freshIdx = freshIdx.coerceAtLeast(1),
                 ps = pageSize
@@ -59,12 +60,12 @@ class VideoRepository(
         }
 
     suspend fun getHotList(page: Int, pageSize: Int): Result<BaseResponse<List<VideoModel>>> =
-        runCatching {
+        catchingRequest {
             apiService.getHotList(page, pageSize).mapListData()
         }
 
     suspend fun getRanking(rid: Int): Result<BaseResponse<List<VideoModel>>> =
-        runCatching {
+        catchingRequest {
             sessionGateway.executeWithRiskControlRetry(
                 key = "ranking_$rid",
                 source = "video.getRanking"
@@ -78,7 +79,7 @@ class VideoRepository(
         offset: String,
         pageSize: Int = 30
     ): Result<BaseResponse<GetVideoByChannelWrapper>> =
-        runCatching {
+        catchingRequest {
             apiService.getVideoByChannel(
                 channelId = channelId,
                 offset = offset,
@@ -87,24 +88,33 @@ class VideoRepository(
         }
 
     suspend fun getVideoDetail(aid: Long?, bvid: String?): Result<BaseResponse<VideoDetailModel>> =
-        runCatching {
-            val first = apiService.getVideoDetail(aid, bvid)
-            if (first.isSuccess || bvid?.isNotBlank() == true) {
-                first
-            } else {
-                // bvid 为空且 detail 接口失败时，用 /view?aid= 回退
-                val validAid = aid?.takeIf { it > 0L }
-                if (validAid != null) {
-                    AppLog.i(TAG, "getVideoDetail: /view/detail failed(${first.code}), fallback /view?aid=$validAid")
-                    apiService.getVideoDetailByAid(validAid)
-                } else {
+        catchingRequest {
+            com.mytvb.repository.cache.VideoMetadataCache.detail(aid, bvid) {
+                val first = apiService.getVideoDetail(aid, bvid)
+                if (first.isSuccess || bvid?.isNotBlank() == true) {
                     first
+                } else {
+                    // bvid 为空且 detail 接口失败时，用 /view?aid= 解析出真实 bvid，
+                    // 再带 bvid 重走 view/detail 全量链（app 推荐流的超大 aid detail 接口不认）
+                    val validAid = aid?.takeIf { it > 0L }
+                    if (validAid != null) {
+                        AppLog.i(TAG, "getVideoDetail: /view/detail failed(${first.code}), fallback /view?aid=$validAid")
+                        val resolvedBvid = apiService.getVideoDetailByAid(validAid)
+                            .data?.bvid?.takeIf { it.isNotBlank() }
+                        if (resolvedBvid != null) {
+                            apiService.getVideoDetail(validAid, resolvedBvid)
+                        } else {
+                            first
+                        }
+                    } else {
+                        first
+                    }
                 }
             }
         }
 
     suspend fun like(avid: Long?, bvid: String?, like: Int, csrf: String): Result<BaseResponse<Int>> =
-        runCatching {
+        catchingRequest {
             securityGateway.ensureHealthyForPlay()
             val firstResponse: BaseResponse<Int> = sessionGateway.syncAuthState(
                 apiService.like(
@@ -134,7 +144,7 @@ class VideoRepository(
         }
 
     suspend fun hasLike(avid: Long?, bvid: String?): Result<BaseResponse<Int>> =
-        runCatching {
+        catchingRequest {
             sessionGateway.syncAuthState(
                 apiService.hasLike(avid, bvid),
                 source = "video.hasLike"
@@ -142,7 +152,7 @@ class VideoRepository(
         }
 
     suspend fun getArchiveRelation(aid: Long?, bvid: String?): Result<BaseResponse<ArchiveRelationModel>> =
-        runCatching {
+        catchingRequest {
             sessionGateway.syncAuthState(
                 apiService.getArchiveRelation(aid, bvid),
                 source = "video.getArchiveRelation"
@@ -150,7 +160,7 @@ class VideoRepository(
         }
 
     suspend fun giveCoin(avid: Long?, bvid: String?, multiply: Int, selectLike: Int, csrf: String): Result<BaseResponse<GiveCoinResultModel>> =
-        runCatching {
+        catchingRequest {
             securityGateway.ensureHealthyForPlay()
             val firstResponse: BaseResponse<GiveCoinResultModel> = sessionGateway.syncAuthState(
                 apiService.giveCoin(
@@ -184,7 +194,7 @@ class VideoRepository(
         }
 
     suspend fun hasGiveCoin(avid: Long?, bvid: String?): Result<BaseResponse<CheckGiveCoinModel>> =
-        runCatching {
+        catchingRequest {
             sessionGateway.syncAuthState(
                 apiService.hasGiveCoin(avid, bvid),
                 source = "video.hasGiveCoin"
@@ -192,7 +202,7 @@ class VideoRepository(
         }
 
     suspend fun tripleAction(avid: Long?, bvid: String?, csrf: String): Result<BaseResponse<TripleActionResultModel>> =
-        runCatching {
+        catchingRequest {
             securityGateway.ensureHealthyForPlay()
             val firstResponse: BaseResponse<TripleActionResultModel> = sessionGateway.syncAuthState(
                 apiService.tripleAction(buildWebActionForm(avid, bvid, csrf, ramval = 6)),
@@ -214,7 +224,7 @@ class VideoRepository(
         }
 
     suspend fun addWatchLater(aid: Long?, bvid: String?, csrf: String): Result<BaseBaseResponse> =
-        runCatching {
+        catchingRequest {
             securityGateway.ensureHealthyForPlay()
             val result = sessionGateway.syncAuthState(
                 apiService.addWatchLater(aid, bvid, csrf),
@@ -224,7 +234,7 @@ class VideoRepository(
         }
 
     suspend fun removeWatchLater(aid: Long?, bvid: String?, csrf: String): Result<BaseBaseResponse> =
-        runCatching {
+        catchingRequest {
             securityGateway.ensureHealthyForPlay()
             val resolvedAid = resolveWatchLaterAid(aid, bvid)
                 ?: error("缺少稍后再看视频标识")
@@ -236,7 +246,7 @@ class VideoRepository(
         }
 
     suspend fun deleteHistoryRecord(kid: String, csrf: String): Result<BaseBaseResponse> =
-        runCatching {
+        catchingRequest {
             securityGateway.ensureHealthyForPlay()
             sessionGateway.syncAuthState(
                 apiService.deleteHistoryRecord(kid, csrf),
@@ -245,7 +255,7 @@ class VideoRepository(
         }
 
     suspend fun checkWatchLater(aid: Long?, bvid: String?): Result<Boolean> =
-        runCatching {
+        catchingRequest {
             val list = getWatchLaterList()
             list.any { item ->
                 matchesWatchLaterItem(item, aid, bvid)
@@ -276,7 +286,7 @@ class VideoRepository(
     }
 
     suspend fun dislikeFeed(video: VideoModel, reasonId: Int, csrf: String): Result<BaseBaseResponse> =
-        runCatching {
+        catchingRequest {
             securityGateway.ensureHealthyForPlay()
             sessionGateway.retryOnRiskControl(
                 key = "dislike_${video.aid}_${video.bvid}",

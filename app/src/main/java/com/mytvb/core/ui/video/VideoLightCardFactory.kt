@@ -27,13 +27,26 @@ import com.mytvb.core.ui.base.UiTextScale
 import pl.droidsonroids.gif.GifDrawable
 import kotlin.math.ceil
 
+/**
+ * 封面比例。全 App 视频卡默认 16:9 横版；影视/番剧这类竖版海报素材（央视片库
+ * 178×226）用 [POSTER_4_5]，按竖版裁切才不会被 centerCrop 切掉上下主体。
+ */
+enum class VideoCardCoverRatio(val aspectWidth: Int, val aspectHeight: Int) {
+    LANDSCAPE_16_9(16, 9),
+    POSTER_4_5(4, 5)
+}
+
 object VideoLightCardFactory {
 
-    fun create(parent: ViewGroup, source: String = "VideoLightCard.flat"): VideoCardViews {
+    fun create(
+        parent: ViewGroup,
+        source: String = "VideoLightCard.flat",
+        coverRatio: VideoCardCoverRatio = VideoCardCoverRatio.LANDSCAPE_16_9
+    ): VideoCardViews {
         val context = parent.context
         val metrics = LightCardMetrics.get(context)
 
-        val root = FlatVideoLightCardLayout(context, metrics, source).apply {
+        val root = FlatVideoLightCardLayout(context, metrics, source, coverRatio).apply {
             id = R.id.click_view
             isClickable = true
             isFocusable = true
@@ -443,11 +456,13 @@ class VideoCardTextLayerView @JvmOverloads constructor(
         color = ownerTextColor
         textSize = metrics.ownerTextSize
     }
-    private val badgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xFFF6A11B.toInt()
+    // 官方推荐理由标签配色（对齐官方 App：暖橙深底 + 橙红字，无描边）
+    private val badgeAccentColor = 0xFFFF8024.toInt()
+    private val badgeFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0x40FF8024
     }
     private val badgeTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xFFFFFFFF.toInt()
+        color = badgeAccentColor
         textSize = metrics.badgeTextSize
         typeface = Typeface.DEFAULT_BOLD
     }
@@ -698,15 +713,60 @@ class VideoCardTextLayerView @JvmOverloads constructor(
         }
     }
 
-    private fun drawLeadingBadge(canvas: Canvas, left: Float, centerY: Float): Float {
-        val badgeWidth = badgeTextPaint.measureText(ownerBadgeText) + metrics.px8 * 2
+    /** 官方「已关注」形态：圆形对勾图标 + 橙红文字，无底板。 */
+    private fun drawFollowedBadge(canvas: Canvas, left: Float, centerY: Float): Float {
+        val iconSize = badgeTextPaint.textSize
+        val iconTop = centerY - iconSize / 2f
+        val circlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = badgeAccentColor }
+        canvas.drawCircle(left + iconSize / 2f, centerY, iconSize / 2f, circlePaint)
+        // 白色对勾（含笔画宽度的外接框与圆同心：x±0.64s / y±0.50s，到圆周留白均匀）
+        val check = Path().apply {
+            val s = iconSize / 2f
+            moveTo(left + iconSize / 2f - s * 0.48f, centerY + s * 0.02f)
+            lineTo(left + iconSize / 2f - s * 0.10f, centerY + s * 0.34f)
+            lineTo(left + iconSize / 2f + s * 0.48f, centerY - s * 0.34f)
+        }
+        canvas.drawPath(
+            check,
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeWidth = iconSize * 0.16f
+                strokeCap = Paint.Cap.ROUND
+                strokeJoin = Paint.Join.ROUND
+                color = 0xFFFFFFFF.toInt()
+            }
+        )
+        val textX = left + iconSize + metrics.px4
+        val fm = badgeTextPaint.fontMetrics
+        canvas.drawText(FOLLOWED_LABEL, textX, centerY - (fm.top + fm.bottom) / 2f, badgeTextPaint)
+        return textX + badgeTextPaint.measureText(FOLLOWED_LABEL)
+    }
+
+    /** 官方推荐理由形态：深色半透明底 + 橙红描边 + 橙红字。 */
+    private fun drawOutlinedBadge(canvas: Canvas, text: String, left: Float, centerY: Float): Float {
+        val width = badgeTextPaint.measureText(text) + metrics.px8 * 2
         val height = badgeHeight()
         val top = centerY - height / 2f
-        badgeRect.set(left, top, left + badgeWidth, top + height)
-        canvas.drawRoundRect(badgeRect, metrics.badgeRadius.toFloat(), metrics.badgeRadius.toFloat(), badgePaint)
+        badgeRect.set(left, top, left + width, top + height)
+        canvas.drawRoundRect(badgeRect, metrics.badgeRadius.toFloat(), metrics.badgeRadius.toFloat(), badgeFillPaint)
         val fm = badgeTextPaint.fontMetrics
-        canvas.drawText(ownerBadgeText, left + metrics.px8, top + metrics.px3 - fm.top, badgeTextPaint)
-        return left + badgeWidth
+        canvas.drawText(text, left + metrics.px8, top + metrics.px3 - fm.top, badgeTextPaint)
+        return left + width
+    }
+
+    private fun drawLeadingBadge(canvas: Canvas, left: Float, centerY: Float): Float {
+        // badgeText 按 "|" 分段依次排布；「已关注」走图标+字无底板，其余走描边胶囊
+        var x = left
+        ownerBadgeText.split("|").forEach { segment ->
+            if (segment.isBlank()) return@forEach
+            if (x > left) x += metrics.px4
+            x = if (segment == FOLLOWED_LABEL) {
+                drawFollowedBadge(canvas, x, centerY)
+            } else {
+                drawOutlinedBadge(canvas, segment, x, centerY)
+            }
+        }
+        return x
     }
 
     private fun titleLines(width: Int): List<String> {
@@ -868,6 +928,9 @@ class VideoCardTextLayerView @JvmOverloads constructor(
 
     private companion object {
         private const val ELLIPSIS = "\u2026"
+
+        /** 与 VideoAdapter.badgeTextFor 的已关注文案保持一致（分段绘制的形态判定键）。 */
+        const val FOLLOWED_LABEL = "已关注"
     }
 }
 
@@ -875,6 +938,7 @@ private class FlatVideoLightCardLayout @JvmOverloads constructor(
     context: Context,
     private val metrics: LightCardMetrics = LightCardMetrics.get(context),
     private val perfSource: String = "VideoLightCard.flat",
+    private val coverRatio: VideoCardCoverRatio = VideoCardCoverRatio.LANDSCAPE_16_9,
     attrs: AttributeSet? = null
 ) : ViewGroup(context, attrs) {
 
@@ -905,7 +969,7 @@ private class FlatVideoLightCardLayout @JvmOverloads constructor(
             return
         }
         coverWidth = contentWidth
-        coverHeight = contentWidth * 9 / 16
+        coverHeight = contentWidth * coverRatio.aspectHeight / coverRatio.aspectWidth
 
         measureExact(imageView, coverWidth, coverHeight)
         measureExact(coverMetaOverlay, coverWidth, coverHeight)
@@ -1002,7 +1066,8 @@ private class LightCardMetrics private constructor(context: Context) {
     val avatarWidth = dimen(context, R.dimen.px40)
     val avatarHeight = dimen(context, R.dimen.px25)
     val badgeOwnerGap = dimen(context, R.dimen.px6)
-    val historyDeviceSize = dimen(context, R.dimen.px30)
+    // 设备图标与左上 UP 角标视觉等高（原 30dip 比 UP 图标大 35%，右组显得"大一圈"）
+    val historyDeviceSize = dimen(context, R.dimen.px22)
     val historyDeviceMarginEnd = dimen(context, R.dimen.px5)
     val playingIconMarginEnd = dp(context, 4)
     val titleIconFallbackSize = dimen(context, R.dimen.px31)

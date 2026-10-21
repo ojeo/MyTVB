@@ -255,7 +255,17 @@ class FavoriteHistoryAdapter(
             views.root.isSelected = isFocused
             views.textLayer.isSelected = isFocused
             views.textLayer.setTitle(item.title.ifBlank { item.showTitle }, lines = 1)
-            views.progressBar.visibility = View.GONE
+            // 观看进度对齐历史卡片：收藏夹接口（fav/resource/list）实测不下发 progress
+            // （恒为 0），有进度才显示轨道，避免空槽误导；接口将来下发即自动生效
+            val durationValue = item.duration.coerceAtLeast(0L)
+            val progressValue = watchedProgress(item.progress, durationValue)
+            if (durationValue > 0L && progressValue > 0L) {
+                views.progressBar.visibility = View.VISIBLE
+                views.progressBar.max = durationValue.toInt()
+                views.progressBar.progress = progressValue.toInt()
+            } else {
+                views.progressBar.visibility = View.GONE
+            }
             val authorName = item.displayAuthorName
             val hasAuthorName = authorName.isNotBlank()
             views.textLayer.setOwner(
@@ -268,8 +278,14 @@ class FavoriteHistoryAdapter(
             views.textLayer.clearHistoryTrailing()
 
             val stat = item.cntInfo
-            val durationValue = item.duration.coerceAtLeast(0L)
-            val durationText = if (durationValue > 0L) NumberUtils.formatDuration(durationValue) else ""
+            val durationText = when {
+                isWatchedComplete(progressValue, durationValue) ->
+                    views.root.context.getString(R.string.adapter_watched_complete)
+                progressValue > 0L ->
+                    "${NumberUtils.formatDuration(progressValue)}/${NumberUtils.formatDuration(durationValue)}"
+                durationValue > 0L -> NumberUtils.formatDuration(durationValue)
+                else -> ""
+            }
             views.coverMetaOverlay.bind(
                 playCountText = stat?.let { NumberUtils.formatCount(views.root.context, it.play) }.orEmpty(),
                 showPlayCount = stat != null,
@@ -311,6 +327,21 @@ class FavoriteHistoryAdapter(
 
     companion object {
         private val nextViewType = AtomicInteger(0x590100)
+
+        // 与 HistoryVideoAdapter 同语义的进度清洗：负进度视为看完，正进度钳到时长内
+        private fun watchedProgress(rawProgress: Long, duration: Long): Long {
+            if (duration <= 0L) return 0L
+            return if (rawProgress < 0L) {
+                duration
+            } else {
+                rawProgress.coerceAtMost(duration)
+            }
+        }
+
+        // 对齐官方"播满才算看完"：progress 到达 duration 才显示已看完
+        private fun isWatchedComplete(progress: Long, duration: Long): Boolean {
+            return duration > 3L && progress >= duration
+        }
 
         private val DiffCallback = object : DiffUtil.ItemCallback<HistoryVideoModel>() {
             override fun areItemsTheSame(oldItem: HistoryVideoModel, newItem: HistoryVideoModel): Boolean {

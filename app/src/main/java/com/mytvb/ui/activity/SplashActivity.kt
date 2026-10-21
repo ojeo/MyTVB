@@ -22,7 +22,7 @@ class SplashActivity : Activity() {
     private val createStartMs = SystemClock.elapsedRealtime()
 
     override fun attachBaseContext(newBase: Context) {
-        UiScale.apply(newBase.resources)
+        UiScale.apply(newBase.resources, "splash")
         super.attachBaseContext(newBase)
     }
 

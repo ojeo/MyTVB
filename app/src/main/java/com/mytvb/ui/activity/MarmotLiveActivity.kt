@@ -18,7 +18,8 @@ import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.widget.ArrayAdapter
-import android.widget.Toast
+
+import androidx.activity.OnBackPressedCallback
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.google.gson.Gson
 import com.mytvb.feature.marmot.quality.CctvQualityProvider
@@ -28,6 +29,8 @@ import com.mytvb.core.common.log.AppLog
 import com.mytvb.core.common.ext.toast
 import com.mytvb.core.ui.base.BaseActivity
 import com.mytvb.databinding.ActivityMarmotLiveBinding
+import com.mytvb.feature.cctv.CctvLiveQuality
+import com.mytvb.feature.cctv.CctvLiveQualityHook
 import com.mytvb.feature.marmot.MarmotCloudUpdate
 import com.mytvb.feature.marmot.MarmotJsBridge
 import com.mytvb.feature.marmot.MarmotLiveData
@@ -39,6 +42,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.mytvb.core.ui.base.AppToast
 
 /**
  * TV 直播主界面（对标参考 utao `LiveActivity.java`，基于系统 WebView）。
@@ -49,11 +53,11 @@ import kotlinx.coroutines.withContext
  * 3. **画质选择**（菜单键弹）：[showQualityMenu] 横向列表，数据来自页面 JS 上报的 videoQuality。
  * 4. **切台**：上下左右键触发 [goNext]，调 [MarmotLiveData.liveNext] 四向环形切台，延迟 1s 加载防抖。
  *
- * 按键映射（按需求，与参考不同）：
- * - **确认键(OK/ENTER)** → [showChannelMenu] 频道列表
- * - **菜单键(MENU)** → [showQualityMenu] 画质选择
- * - **上下左右** → [goNext] 切台 + 转发页面脚本
- * - **返回键** → 关闭浮层/退出
+ * 按键映射（按需求）：
+ * - **确认键(OK/ENTER)** → 呼出/导航播放UI
+ * - **菜单键(MENU)** → [showChannelMenu] 频道列表
+ * - **上下左右** → 无浮层时 [goNext] 切台 + 转发页面脚本；播放UI显示时在按钮间导航
+ * - **返回键** → 优先级 浮层关闭 > 收起播放UI > 双击退出（见 [handleBackKey]）
  */
 class MarmotLiveActivity : BaseActivity<ActivityMarmotLiveBinding>() {
 
@@ -96,7 +100,7 @@ class MarmotLiveActivity : BaseActivity<ActivityMarmotLiveBinding>() {
             com.mytvb.core.common.content.TeenModeTimer.tick()
             if (com.mytvb.core.common.content.TeenModeTimer.isResting()) {
                 val restMin = com.mytvb.core.common.content.TeenModeTimer.getRestLimitMin().coerceAtLeast(1)
-                android.widget.Toast.makeText(this@MarmotLiveActivity, getString(R.string.activity_teen_rest_needed_format, restMin), android.widget.Toast.LENGTH_SHORT).show()
+                AppToast.show(this@MarmotLiveActivity, getString(R.string.activity_teen_rest_needed_format, restMin))
                 finish()
                 return
             }
@@ -189,6 +193,11 @@ class MarmotLiveActivity : BaseActivity<ActivityMarmotLiveBinding>() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun initView() {
         jsBridge = MarmotJsBridge(this, jsCallbacks)
+        // BACK 兜底：手势返回等非按键路径统一走 handleBackKey，
+        // 防止 OnBackPressedDispatcher 无回调时落到默认 fallback 直接 finish
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() = handleBackKey()
+        })
         // 青少年模式：启动观看时长定时器
         mainHandler.postDelayed(teenModeTicker, 15_000L)
         initWebView()
@@ -219,6 +228,7 @@ class MarmotLiveActivity : BaseActivity<ActivityMarmotLiveBinding>() {
                 }
             },
             onPageLoaded = { url ->
+                AppLog.i(TAG, "页面加载完成: url=$url")
                 // 注意：这里不再调用 showLiveName。
                 // 频道名提示已在 goNext / playCurrent / 频道列表选台时显示。
                 // 若在此再次显示，实机 WebView 加载慢时 onPageLoaded 可能在
@@ -275,7 +285,7 @@ class MarmotLiveActivity : BaseActivity<ActivityMarmotLiveBinding>() {
             AppLog.i(TAG, "initData: 频道表加载结果=$loaded")
             if (!loaded) {
                 AppLog.e(TAG, "initData: 频道数据加载失败，请检查网络/明文流量权限/filesDir 是否损坏")
-                Toast.makeText(this@MarmotLiveActivity, R.string.activity_channel_load_failed, Toast.LENGTH_SHORT).show()
+                AppToast.show(this@MarmotLiveActivity, R.string.activity_channel_load_failed)
                 return@launch
             }
             provinces.clear()
@@ -304,7 +314,7 @@ class MarmotLiveActivity : BaseActivity<ActivityMarmotLiveBinding>() {
             AppLog.i(TAG, "initData: CCTV 频道过滤后 ${provinces.size} 个分组，" +
                 "${provinces.sumOf { it.vods.size }} 个频道")
             if (provinces.isEmpty()) {
-                Toast.makeText(this@MarmotLiveActivity, R.string.activity_no_cctv_channels, Toast.LENGTH_SHORT).show()
+                AppToast.show(this@MarmotLiveActivity, R.string.activity_no_cctv_channels)
                 return@launch
             }
             // 3. 恢复上次观看频道：优先按保存的 URL 反查（必须是 CCTV 频道），否则回退首个 CCTV 频道
@@ -316,11 +326,11 @@ class MarmotLiveActivity : BaseActivity<ActivityMarmotLiveBinding>() {
                 provinces.first().vods.first()
             }
             if (currentVod == null) {
-                Toast.makeText(this@MarmotLiveActivity, R.string.activity_no_channels, Toast.LENGTH_SHORT).show()
+                AppToast.show(this@MarmotLiveActivity, R.string.activity_no_channels)
                 return@launch
             }
             playCurrent()
-            Toast.makeText(this@MarmotLiveActivity, R.string.activity_remote_switch_channel_tip, Toast.LENGTH_SHORT).show()
+            AppToast.show(this@MarmotLiveActivity, R.string.activity_remote_switch_channel_tip)
         }
     }
 
@@ -334,7 +344,7 @@ class MarmotLiveActivity : BaseActivity<ActivityMarmotLiveBinding>() {
         if (channelId != null) {
             val baseUrl = "https://tv.cctv.com/live/$channelId/m/" +
                 "#${com.mytvb.feature.marmot.web.MarmotSystemWebViewClient.MYBILI_CCTV_NATIVE_MARKER}"
-            val html = buildCctvPlayerHtml(channelId, cctvQualityProvider.current.br)
+            val html = buildCctvPlayerHtml(channelId, cctvQualityProvider.current)
             AppLog.i(TAG, "playCurrent: CCTV 原生播放 channelId=$channelId quality=${cctvQualityProvider.current.label}")
             // CCTV 自构 HTML 无网页闪现，确保清掉可能残留的遮罩
             hideVideoCover()
@@ -357,11 +367,12 @@ class MarmotLiveActivity : BaseActivity<ActivityMarmotLiveBinding>() {
     /**
      * 构造 CCTV 直播播放 HTML（对标 v1.5.8 `CctvPlayerActivity.buildPlayerHtml`）。
      *
-     * 加载 CCTV 官方 liveplayer.js，调 `createLivePlayer({t: channelId, br: 画质})` 初始化播放器。
-     * [br] 参数直接指定画质码率（1080/720/540/360），切画质 = 改 br 重建（真正切流，区别于 hzChoose 的 click 假切）。
+     * 加载 CCTV 官方 liveplayer.js，调 `createLivePlayer({t: channelId})` 初始化播放器。
+     * 画质：官方脚本已忽略 br 参数，真正切流靠 [CctvLiveQualityHook] 改写 master 清单
+     * 请求的 `b=` 码率窗口（整页重建 = hook 按新档位注入，详见 [CctvLiveQuality]）。
      */
     @SuppressLint("SetJavaScriptEnabled")
-    private fun buildCctvPlayerHtml(channelId: String, br: String): String {
+    private fun buildCctvPlayerHtml(channelId: String, quality: CctvLiveQuality): String {
         val scriptTags = CCTV_PLAYER_SCRIPTS.joinToString("\n") { url ->
             """              <script src="$url"></script>"""
         }
@@ -386,6 +397,7 @@ $scriptTags
             <body>
               <div id="player"></div>
               <script>
+                ${CctvLiveQualityHook.script(quality.bRange)}
                 (function() {
                   var channel = '$channelId';
                   function size() {
@@ -403,13 +415,35 @@ $scriptTags
                     var s = size();
                     var playerParas = {
                       divId: 'player', w: s.w, h: s.h, t: channel,
-                      isAutoPlay: 'true', ruleVisible: 'false', br: '$br',
+                      isAutoPlay: 'true', ruleVisible: 'false', br: '',
                       posterImg: '', isLive4k: 'false', isHttps: 'true', wmode: 'opaque',
                       hasBarrage: 'false', playerType: 'hw', webFullScreenOn: 'false',
                       isLeftBottom: 'false', jumpToApp: 'false', others: ''
                     };
-                    console.log('mybili cctv createLivePlayer ' + channel + ' ' + s.w + 'x' + s.h + ' br=$br');
+                    console.log('mybili cctv createLivePlayer ' + channel + ' ' + s.w + 'x' + s.h + ' target=${quality.label}');
                     createLivePlayer(playerParas);
+                    // 画质验证上报：起播后上报实际流分辨率，用于核对码率窗口是否真正切流
+                    // （切换无效时各档上报的分辨率会相同）。60s 未起播打一条诊断。
+                    var reported = false;
+                    var t0 = Date.now();
+                    var infoTimer = setInterval(function() {
+                      try {
+                        var v = document.getElementsByTagName('video')[0];
+                        if (!reported && v && (v.videoWidth || 0) > 0 && !v.paused) {
+                          reported = true;
+                          console.log('mybili cctv videoInfo channel=' + channel + ' target=${quality.label} ' +
+                            v.videoWidth + 'x' + v.videoHeight +
+                            ' src=' + (v.currentSrc || v.src || ''));
+                          clearInterval(infoTimer);
+                          return;
+                        }
+                        if (Date.now() - t0 > 60000) {
+                          console.log('mybili cctv videoInfo timeout channel=' + channel + ' target=${quality.label} video=' +
+                            (v ? ((v.videoWidth || 0) + 'x' + (v.videoHeight || 0) + ' paused=' + !!v.paused) : 'none'));
+                          clearInterval(infoTimer);
+                        }
+                      } catch (e) {}
+                    }, 500);
                   }
                   window.addEventListener('resize', function() {
                     var v = document.getElementsByTagName('video')[0];
@@ -582,7 +616,7 @@ $scriptTags
     /** 显示频道列表浮层（双排）。 */
     private fun showChannelMenu() {
         if (provinces.isEmpty()) {
-            Toast.makeText(this, R.string.activity_channel_loading, Toast.LENGTH_SHORT).show()
+            AppToast.show(this, R.string.activity_channel_loading)
             return
         }
         isChannelMenuShowing = true
@@ -638,7 +672,7 @@ $scriptTags
         val items = provider.availableQualities()
         AppLog.i(TAG, "showQualityMenu: provider=${provider.javaClass.simpleName} 画质 ${items.size} 项")
         if (items.isEmpty()) {
-            Toast.makeText(this, R.string.activity_no_quality_options, Toast.LENGTH_SHORT).show()
+            AppToast.show(this, R.string.activity_no_quality_options)
             return
         }
         val currentIdx = provider.currentQualityIndex(items)
@@ -722,7 +756,9 @@ $scriptTags
     // ==================== 播放UI（顶栏返回+时钟、底部控制栏，呼出/自动隐藏对齐普通视频播放器） =====================
 
     private fun setupPlayerController() {
-        // 返回：与普通视频播放器 button_back 一致，单击直接退出播放器；触摸点击带按压缩放反馈
+        // 返回按钮 = 单击退出直播（对齐普通视频播放器 button_back → onClose → 退出播放页）；
+        // 遥控 BACK 键另走 [handleBackKey] 三层优先级（浮层 > 播放UI > 双击退出）。
+        // 触摸点击带按压缩放反馈
         binding.buttonBack.touchPressFeedback = true
         binding.buttonBack.setOnClickListener { finish() }
         binding.buttonChannel.setOnClickListener {
@@ -754,6 +790,10 @@ $scriptTags
         binding.controller.visibility = View.VISIBLE
         mainHandler.removeCallbacks(hideControllerRunnable)
         mainHandler.postDelayed(hideControllerRunnable, CONTROLLER_HIDE_DELAY_MS)
+        // 呼出即默认聚焦频道按钮（对齐普通播放器 requestFocus(button_play)）；
+        // 聚焦成功会触发 onFocusChange 取消上面排的自动隐藏（焦点在按钮上不计时），
+        // 触摸模式下按钮不可 touch 聚焦，requestFocus 失败则 5s 照常收起
+        binding.buttonChannel.requestFocus()
     }
 
     private fun hideController() {
@@ -761,6 +801,8 @@ $scriptTags
         mainHandler.removeCallbacks(hideControllerRunnable)
         binding.topBar.visibility = View.GONE
         binding.controller.visibility = View.GONE
+        // 收起播放UI即打断退出连击：避免「关UI」那一下被算作双击退出的第一下
+        exitTime = 0L
         // 收起后焦点回到播放区，避免落在已隐藏的按钮上
         if (!binding.marmotRoot.isFocused) {
             binding.marmotRoot.requestFocus()
@@ -791,9 +833,14 @@ $scriptTags
         if (!isControllerShowing) return false
         val rect = android.graphics.Rect()
         return listOf(binding.buttonBack, binding.controller).any { target ->
-            target.visibility == View.VISIBLE &&
-                target.getGlobalVisibleRect(rect) &&
-                rect.contains(ev.rawX.toInt(), ev.rawY.toInt())
+            if (target.visibility != View.VISIBLE || !target.getGlobalVisibleRect(rect)) {
+                return@any false
+            }
+            // controller 顶部是渐变羽化 padding（视觉上仍属视频区），点击应照常 toggle 控制栏
+            if (target === binding.controller) {
+                rect.top += binding.controller.paddingTop
+            }
+            rect.contains(ev.rawX.toInt(), ev.rawY.toInt())
         }
     }
 
@@ -861,6 +908,30 @@ $scriptTags
         return super.dispatchTouchEvent(ev)
     }
 
+    /**
+     * BACK 统一处理，优先级：频道/画质浮层 > 播放UI > 双击退出。
+     *
+     * 由 [onBackPressedDispatcher] 的 callback 调用（与普通视频播放器同构）：
+     * BACK 不在 [dispatchKeyEvent] 里处理——按键 DOWN 走系统 dispatch、UP 走
+     * OnBackInvoked 两条路各来一次，DOWN 处再处理会与 UP 形成「伪双击」秒退。
+     */
+    private fun handleBackKey() {
+        AppLog.i(TAG, "handleBackKey ch=$isChannelMenuShowing q=$isQualityMenuShowing ui=$isControllerShowing")
+        when {
+            isChannelMenuShowing -> hideChannelMenu()
+            isQualityMenuShowing -> hideQualityMenu()
+            isControllerShowing -> hideController()
+            else -> {
+                if (System.currentTimeMillis() - exitTime <= exitInterval) {
+                    finish()
+                } else {
+                    exitTime = System.currentTimeMillis()
+                    AppToast.show(this, R.string.activity_exit_live_hint)
+                }
+            }
+        }
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_UP) {
             // 播放UI按钮的 OK 已在 ACTION_DOWN 消费（聚焦/激活），吞掉对应 UP
@@ -874,15 +945,17 @@ $scriptTags
         val keyCode = event.keyCode
 
         // —— 频道列表浮层（双排：FocusLockRecyclerView 在 focusSearch 层防溢出）——
+        // BACK 不在此处理：统一走 OnBackPressedCallback → handleBackKey，避免
+        // DOWN（本方法）与 UP（系统 OnBackInvoked）各触发一次形成「伪双击」秒退
         if (isChannelMenuShowing) {
             when (keyCode) {
-                KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_MENU -> { hideChannelMenu(); return true }
+                KeyEvent.KEYCODE_MENU -> { hideChannelMenu(); return true }
             }
             return super.dispatchKeyEvent(event)
         }
         if (isQualityMenuShowing) {
             when (keyCode) {
-                KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_MENU -> {
+                KeyEvent.KEYCODE_MENU -> {
                     AppLog.i(TAG, "画质菜单关闭: keyCode=$keyCode")
                     hideQualityMenu(); return true
                 }
@@ -905,10 +978,9 @@ $scriptTags
             return super.dispatchKeyEvent(event)
         }
 
-        // —— 播放UI显示时：方向键在 返回↔底部按钮行 间导航，BACK 收起 ——
+        // —— 播放UI显示时：方向键在 返回↔底部按钮行 间导航 ——
         if (isControllerShowing) {
             when (keyCode) {
-                KeyEvent.KEYCODE_BACK -> { hideController(); return true }
                 KeyEvent.KEYCODE_DPAD_UP -> {
                     if (isBottomControllerButtonFocused()) {
                         // 底部按钮行上移到右上角返回按钮
@@ -925,12 +997,24 @@ $scriptTags
                     return true
                 }
                 KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                    // 底部三按钮 频道→画质→刷新 左右循环；返回按钮左右进入按钮行
-                    when {
-                        binding.buttonBack.isFocused -> binding.buttonChannel.requestFocus()
-                        binding.buttonChannel.isFocused -> binding.buttonQuality.requestFocus()
-                        binding.buttonQuality.isFocused -> binding.buttonRefresh.requestFocus()
-                        else -> binding.buttonChannel.requestFocus()
+                    // 左右按直觉移动、不循环；最左（频道）/最右（刷新）边界原地不动。
+                    // 返回按钮在左上角：LEFT 不动，RIGHT 进入按钮行
+                    if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
+                        when {
+                            binding.buttonQuality.isFocused -> binding.buttonChannel.requestFocus()
+                            binding.buttonRefresh.isFocused -> binding.buttonQuality.requestFocus()
+                            binding.buttonChannel.isFocused -> Unit
+                            binding.buttonBack.isFocused -> Unit
+                            else -> binding.buttonChannel.requestFocus()
+                        }
+                    } else {
+                        when {
+                            binding.buttonBack.isFocused -> binding.buttonChannel.requestFocus()
+                            binding.buttonChannel.isFocused -> binding.buttonQuality.requestFocus()
+                            binding.buttonQuality.isFocused -> binding.buttonRefresh.requestFocus()
+                            binding.buttonRefresh.isFocused -> Unit
+                            else -> binding.buttonChannel.requestFocus()
+                        }
                     }
                     return true
                 }
@@ -955,8 +1039,13 @@ $scriptTags
 
         // —— 无浮层时 ——
         when (keyCode) {
-            // 确认键 → 呼出播放UI（统一普通视频播放器的确定键行为）
-            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> { showController(); return true }
+            // 确认键 → 呼出播放UI并默认聚焦频道按钮（对齐普通播放器确定键行为）；
+            // OK 的 UP 吞掉：防止 UP 落到刚聚焦的频道按钮上触发 performClick 秒开频道菜单
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                consumeNextOkUp = true
+                showController()
+                return true
+            }
             // 菜单键 → 频道选择（统一普通视频播放器的菜单键呼出面板行为）
             KeyEvent.KEYCODE_MENU -> { showChannelMenu(); return true }
             // 上下左右 → 切台 + 转发页面脚本
@@ -964,15 +1053,6 @@ $scriptTags
             KeyEvent.KEYCODE_DPAD_DOWN -> { forwardKeyToPage("down"); return goNext("down") }
             KeyEvent.KEYCODE_DPAD_LEFT -> { forwardKeyToPage("left"); return goNext("left") }
             KeyEvent.KEYCODE_DPAD_RIGHT -> { forwardKeyToPage("right"); return goNext("right") }
-            KeyEvent.KEYCODE_BACK -> {
-                if (System.currentTimeMillis() - exitTime <= exitInterval) {
-                    finish()
-                } else {
-                    exitTime = System.currentTimeMillis()
-                    Toast.makeText(this, R.string.activity_exit_live_hint, Toast.LENGTH_SHORT).show()
-                }
-                return true
-            }
         }
         return super.dispatchKeyEvent(event)
     }

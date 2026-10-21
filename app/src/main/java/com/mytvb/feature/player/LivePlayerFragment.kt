@@ -1,11 +1,16 @@
 package com.mytvb.feature.player
 
 import android.animation.AnimatorListenerAdapter
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Toast
+
+import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.Lifecycle
@@ -18,7 +23,9 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import com.mytvb.BuildConfig
 import com.mytvb.feature.player.extractor.FlvHevcExtractor
+import com.mytvb.feature.player.danmaku.LiveSuperChatSignal
 import com.mytvb.feature.player.settings.AudioBalanceSettings
 import com.mytvb.feature.player.settings.PlayerSettingsStore
 import androidx.media3.extractor.ExtractorsFactory
@@ -34,6 +41,7 @@ import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import org.koin.android.ext.android.inject
 import org.koin.androidx.viewmodel.ext.android.viewModel
+import com.mytvb.core.ui.base.AppToast
 
 @UnstableApi
 class LivePlayerFragment : Fragment() {
@@ -62,6 +70,8 @@ class LivePlayerFragment : Fragment() {
     private var roomId: Long = 0L
     private var retryCount = 0
     private var isRetrying = false
+    private var debugScReceiver: BroadcastReceiver? = null
+    private var debugScPool: List<com.mytvb.model.live.LiveRoomItem> = emptyList()
 
     private val playerListener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
@@ -135,9 +145,60 @@ class LivePlayerFragment : Fragment() {
         }
         setupPlayer()
         setupObservers()
+        if (BuildConfig.DEBUG) {
+            registerDebugScReceiver()
+            // 假 SC 数据池：登录账号关注且正在直播的 UP（真实头像+名字）
+            viewLifecycleOwner.lifecycleScope.launch {
+                debugScPool = runCatching { com.mytvb.network.api.BiliApi.attentionLiveList(1).second }
+                    .onFailure { AppLog.w(TAG, "debug SC pool load failed: ${it.message}") }
+                    .getOrDefault(emptyList())
+                AppLog.i(TAG, "debug SC pool loaded: ${debugScPool.size} anchors")
+            }
+        }
         if (roomId > 0) {
             viewModel.loadLiveStream(roomId)
         }
+    }
+
+    /**
+     * 调试用：adb 注入假 SC 验证卡片队列（release 不注册）。
+     * adb shell am broadcast -a com.mytvb.DEBUG_SC --es msg "超长内容..." --es user 用户名 --ei price 50 --ei time 15
+     */
+    private fun registerDebugScReceiver() {
+        debugScReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                val extras = intent.extras ?: return
+                // am broadcast --ei 传的是 Int，直接 getLong 会拿默认值，按实际类型取；
+                // BaseBundle.get(String) 已废弃但这里是刻意类型无关（--ei/--el 混用），无 typed 等价物
+                @Suppress("DEPRECATION")
+                fun extraLong(name: String, def: Long): Long = when (val v = extras.get(name)) {
+                    is Long -> v
+                    is Int -> v.toLong()
+                    else -> def
+                }
+                val id = System.currentTimeMillis()
+                val pick = debugScPool.randomOrNull()
+                binding.playerView.showLiveSuperChat(
+                    LiveSuperChatSignal.New(
+                        id = id,
+                        userName = extras.getString("user") ?: pick?.uname?.takeIf { it.isNotBlank() } ?: "调试用户$id",
+                        avatarUrl = extras.getString("avatar") ?: pick?.face.orEmpty(),
+                        avatarFrameUrl = extras.getString("frame").orEmpty(),
+                        message = extras.getString("msg") ?: "调试 SC 内容",
+                        priceYuan = extraLong("price", 50L),
+                        backgroundColor = 0xFF000000.toInt() or extraLong("bg", 0x68C5F0L).toInt(),
+                        durationSec = extraLong("time", 60L)
+                    )
+                )
+            }
+        }
+        // EXPORTED 才能收到 adb shell 广播；仅 DEBUG 构建注册
+        ContextCompat.registerReceiver(
+            requireContext(),
+            debugScReceiver!!,
+            IntentFilter("com.mytvb.DEBUG_SC"),
+            ContextCompat.RECEIVER_EXPORTED
+        )
     }
 
     private fun setupPlayer() {
@@ -199,13 +260,18 @@ class LivePlayerFragment : Fragment() {
                 binding.playerView.showLiveQualityMenu()
             }
 
+            override fun onSuperChatSwitch(enabled: Boolean) {
+                PlayerSettingsStore.saveShowLiveSuperChat(enabled)
+                binding.playerView.setLiveSuperChatEnabled(enabled)
+            }
+
             override fun onLiveLineSettings() {
                 binding.playerView.showLiveLineMenu()
             }
 
             override fun onRefresh() {
                 if (roomId > 0) {
-                    Toast.makeText(requireContext(), getString(R.string.live_toast_refreshing), Toast.LENGTH_SHORT).show()
+                    AppToast.show(requireContext(), getString(R.string.live_toast_refreshing))
                     viewModel.refreshLiveStream(roomId)
                 }
             }
@@ -237,6 +303,10 @@ class LivePlayerFragment : Fragment() {
         // 初始化直播弹幕：启用弹幕，启动引擎（不等待数据）
         binding.playerView.setDanmakuEnabled(true)
         binding.playerView.startLiveDanmaku()
+
+        // SC（醒目留言）独立于弹幕开关，默认开
+        binding.playerView.setLiveSuperChatEnabled(PlayerSettingsStore.load(requireContext()).showLiveSuperChat)
+        binding.playerView.showHideScSwitchButton(true)
 
         syncPlaybackEnvironment()
     }
@@ -337,7 +407,7 @@ class LivePlayerFragment : Fragment() {
 
         viewLifecycleOwner.lifecycleScope.launch {
             viewModel.refreshEvent.collect { msg ->
-                Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show()
+                AppToast.show(requireContext(), msg)
             }
         }
 
@@ -346,6 +416,22 @@ class LivePlayerFragment : Fragment() {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 viewModel.liveDanmaku.collect { dmModel ->
                     binding.playerView.addLiveDanmaku(dmModel)
+                }
+            }
+        }
+
+        // SC（醒目留言）：左侧卡片队列，独立于弹幕开关；每条消息时读设置，改设置即时生效
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.superChat.collect { signal ->
+                    val enabled = PlayerSettingsStore.load(requireContext()).showLiveSuperChat
+                    binding.playerView.setLiveSuperChatEnabled(enabled)
+                    if (enabled) {
+                        when (signal) {
+                            is LiveSuperChatSignal.New -> binding.playerView.showLiveSuperChat(signal)
+                            is LiveSuperChatSignal.Delete -> binding.playerView.removeLiveSuperChat(signal.id)
+                        }
+                    }
                 }
             }
         }
@@ -366,8 +452,13 @@ class LivePlayerFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        debugScReceiver?.let {
+            runCatching { requireContext().unregisterReceiver(it) }
+        }
+        debugScReceiver = null
         player?.removeListener(playerListener)
         binding.playerView.stopDanmaku()
+        binding.playerView.clearLiveSuperChat()
         binding.playerView.destroy()
         player?.release()
         activity?.let { ViewUtils.keepScreenOn(it, false) }

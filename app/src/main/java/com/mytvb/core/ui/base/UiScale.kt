@@ -106,18 +106,23 @@ object UiScale {
      * 幂等，重复调用安全。
      */
     @Suppress("DEPRECATION")
-    fun apply(resources: Resources) {
+    fun apply(resources: Resources, reason: String = "direct") {
         val metrics = resources.displayMetrics
-        val target = designScale(metrics.widthPixels, metrics.heightPixels) * scale()
+        val screenW = metrics.widthPixels
+        val screenH = metrics.heightPixels
+        val target = designScale(screenW, screenH) * scale()
         val fontScale = resources.configuration.fontScale.takeIf { it > 0f } ?: 1f
+        val before = metrics.density
         metrics.density = target
         metrics.densityDpi = (target * 160).toInt()
         metrics.scaledDensity = target * fontScale
+        // before->target：before≠target 即"本次真的改了密度"；同一弹窗生命周期内出现多组
+        // 不同 target（如 2.0 后又 1.0）就是"两阶段密度"（弹窗先大后小的根因线索）
         AppLog.i(
             TAG,
-            "apply screen=${metrics.widthPixels}x${metrics.heightPixels} " +
-                "design=${designScale(metrics.widthPixels, metrics.heightPixels)} " +
-                "percent=$cachedPercent density=$target dpi=${metrics.densityDpi} fontScale=$fontScale"
+            "apply[$reason] screen=${screenW}x${screenH} " +
+                "density $before->$target design=${designScale(screenW, screenH)} " +
+                "percent=$cachedPercent dpi=${metrics.densityDpi} fontScale=$fontScale"
         )
     }
 
@@ -144,7 +149,7 @@ object UiScale {
                     "scaledDensity $scaledCurrent->$scaledTarget " +
                     "screen=${metrics.widthPixels}x${metrics.heightPixels} percent=$cachedPercent"
             )
-            apply(resources)
+            apply(resources, "guard")
         }
     }
 }

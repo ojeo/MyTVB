@@ -65,12 +65,24 @@
 -dontwarn javax.annotation.**
 -dontwarn kotlin.Unit
 -dontwarn retrofit2.**
+# gRPC 引用的 JNDI 类在 Android 上不存在（DNS 解析不走 JNDI）
+-dontwarn javax.naming.**
 
 # 移除日志（release 构建）
 -assumenosideeffects class android.util.Log {
     public static int v(...);
     public static int d(...);
     public static int i(...);
+}
+
+# protobuf-javalite：jar 依赖不自带 consumer 规则，生成类的字段必须手动保留。
+# 运行时 MessageSchema 按字段名反射访问生成类字段（如热门 gRPC 请求的 idx_），
+# 字段被 R8 改名即抛 "Field idx_ for x4.c not found. Known fields are [...]"
+# （release 包热门 tab 必现；debug 不混淆所以开发期无感知）。
+-keep class com.google.protobuf.** { *; }
+-keep class bilibili.** { *; }
+-keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite {
+    <fields>;
 }
 
 # Kotlin 协程

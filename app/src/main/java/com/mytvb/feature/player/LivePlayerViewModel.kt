@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.mytvb.R
 import com.mytvb.core.common.log.AppLog
 import com.mytvb.feature.player.danmaku.LiveDanmakuManager
+import com.mytvb.feature.player.danmaku.LiveSuperChatSignal
 import com.mytvb.model.dm.DmModel
 import com.mytvb.model.live.LiveDUrlModel
 import com.mytvb.repository.LiveRepository
@@ -68,6 +69,9 @@ class LivePlayerViewModel(
     // 弹幕
     val liveDanmaku: SharedFlow<DmModel> = danmakuManager.danmakuFlow
     val danmakuConnected: StateFlow<Boolean> = danmakuManager.isConnected
+
+    // SC（醒目留言）：独立于弹幕开关的左侧卡片队列
+    val superChat: SharedFlow<LiveSuperChatSignal> = danmakuManager.superChatFlow
 
     private var currentRoomId: Long = 0
     private var heartbeatJob: Job? = null

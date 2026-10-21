@@ -20,6 +20,13 @@ interface MeTabPage : TabContentFocusTarget {
      */
     fun focusNearestVisibleContent(): Boolean = false
 
+    /**
+     * 会话跳变（UserSessionChanged）触发的全量刷新是否让位：
+     * 历史页从播放器返回时静默刷新进行中（同接口数据在途），回顶重排只会把它挤掉，
+     * 此时返回 true 让宿主跳过 refresh；真实登出跳变由下次 tab 重选/手动刷新兜底。
+     */
+    fun shouldDeferSessionRefresh(): Boolean = false
+
     enum class HostEvent {
         SELECT_TAB4,
         CLICK_TAB4,

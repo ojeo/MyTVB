@@ -193,18 +193,23 @@ class MeFragment : BaseFragment<FragmentMeBinding>(), MainTabFocusTarget, OnBack
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 mainNavigationViewModel.events.collectLatest { event ->
+                    // MainTabSelected(5) 是「正在切到本页」的信号：事件经 Main.immediate
+                    // 同步分发，先于 showFragment 的 show 事务生效，此刻 isHidden 仍是
+                    // true——本页自己的选中事件若被下面的 isHidden 守卫吞掉，从其它主
+                    // tab 切回时 SELECT_TAB4 永远送不到子 tab（历史页表现为不刷新）。
+                    if (event is MainNavigationViewModel.Event.MainTabSelected) {
+                        if (event.index == 5) {
+                            if (viewModel.shouldRefresh(USER_INFO_CACHE_TTL_MS)) {
+                                viewModel.loadUserInfo()
+                            }
+                            dispatchHostEvent(MeTabPage.HostEvent.SELECT_TAB4)
+                        }
+                        return@collectLatest
+                    }
                     if (isHidden) {
                         return@collectLatest
                     }
                     when (event) {
-                        is MainNavigationViewModel.Event.MainTabSelected ->
-                            if (event.index == 5) {
-                                if (viewModel.shouldRefresh(USER_INFO_CACHE_TTL_MS)) {
-                                    viewModel.loadUserInfo()
-                                }
-                                dispatchHostEvent(MeTabPage.HostEvent.SELECT_TAB4)
-                            }
-
                         is MainNavigationViewModel.Event.MainTabReselected ->
                             if (event.index == 5) {
                                 if (viewModel.shouldRefresh(USER_INFO_CACHE_TTL_MS)) {
@@ -235,13 +240,18 @@ class MeFragment : BaseFragment<FragmentMeBinding>(), MainTabFocusTarget, OnBack
 
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                appEventHub.events.collectLatest { event ->
+                    appEventHub.events.collectLatest { event ->
                     if (event == AppEventHub.Event.UserSessionChanged) {
                         pendingRefreshAfterLogin = true
                         viewModel.loadUserInfo()
                         adapter.getFragments().forEach { fragment ->
                             if (fragment.view != null) {
-                                (fragment as? MeTabPage)?.refresh()
+                                val page = fragment as? MeTabPage ?: return@forEach
+                                if (page.shouldDeferSessionRefresh()) {
+                                    // 静默刷新进行中（如播放器返回），同接口数据在途，跳过回顶重排
+                                    return@forEach
+                                }
+                                page.refresh()
                             }
                         }
                     }
@@ -388,7 +398,12 @@ class MeFragment : BaseFragment<FragmentMeBinding>(), MainTabFocusTarget, OnBack
                 if (!isAdded || view == null) return@post
                 adapter.getFragments().forEach { fragment ->
                     if (fragment.view != null) {
-                        (fragment as? MeTabPage)?.refresh()
+                        val page = fragment as? MeTabPage ?: return@forEach
+                        if (page.shouldDeferSessionRefresh()) {
+                            // 静默刷新进行中（如播放器返回），同接口数据在途，跳过回顶重排
+                            return@forEach
+                        }
+                        page.refresh()
                     }
                 }
             }

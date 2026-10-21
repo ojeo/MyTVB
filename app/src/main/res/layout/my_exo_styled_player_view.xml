@@ -41,6 +41,11 @@
         android:layout_gravity="top"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
+    <com.mytvb.feature.player.view.LiveSuperChatHostView
+        android:id="@+id/super_chat_host"
+        android:visibility="gone"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
     <com.mytvb.feature.player.interaction.InteractionOverlayView
         android:id="@+id/interaction_view"
         android:visibility="gone"

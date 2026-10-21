@@ -31,6 +31,9 @@ class LiveDanmakuManager(
     private val _danmakuFlow = MutableSharedFlow<DmModel>(extraBufferCapacity = 128)
     val danmakuFlow: SharedFlow<DmModel> = _danmakuFlow.asSharedFlow()
 
+    private val _superChatFlow = MutableSharedFlow<LiveSuperChatSignal>(extraBufferCapacity = 16)
+    val superChatFlow: SharedFlow<LiveSuperChatSignal> = _superChatFlow.asSharedFlow()
+
     private val _isConnected = MutableStateFlow(false)
     val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
 
@@ -99,6 +102,13 @@ class LiveDanmakuManager(
             }
         }
 
+        // SC 是付费内容，不进弹幕过滤，全量转发
+        val superChatJob = scope.launch {
+            client.superChatSignals.collect { signal ->
+                _superChatFlow.tryEmit(signal)
+            }
+        }
+
         // 监听连接状态，断开时取消 messageJob 让 connectOnce 结束
         val stateJob = scope.launch {
             client.connectionState.collect { state ->
@@ -118,6 +128,7 @@ class LiveDanmakuManager(
         } finally {
             client.release()
             stateJob.cancel()
+            superChatJob.cancel()
         }
     }
 
@@ -125,28 +136,32 @@ class LiveDanmakuManager(
         runCatching { sessionGateway.ensureWbiKeys() }
             .onFailure { AppLog.w(TAG, "ensureWbiKeys failed: ${it.message}") }
 
-        val (imgKey, subKey) = sessionGateway.getWbiKeys()
         val unsignedParams = mapOf(
             "id" to roomId.toString(),
             "type" to "0",
             "web_location" to WEB_LOCATION_LIVE_ROOM
         )
-        val signedParams = WbiGenerator.generateWbiParams(unsignedParams, imgKey, subKey)
-
-        val wbiResponse = apiService.getLiveDanmuInfoSigned(signedParams)
-        if (wbiResponse.code == 0 && wbiResponse.data != null) {
-            val data = wbiResponse.data
-            if (data.token.isNotBlank()) return data
+        val (imgKey, subKey) = sessionGateway.getWbiKeys()
+        var response = apiService.getLiveDanmuInfoSigned(
+            WbiGenerator.generateWbiParams(unsignedParams, imgKey, subKey)
+        )
+        if (response.code != 0) {
+            // getDanmuInfo 无签名版已被服务端风控（对标 BiliPai 的"强制 WBI 不回退"
+            // 结论），失败时唯一正确的路是强制刷新密钥换 key 重试一次，不降级到
+            // 无签名请求——那只会再吃一次 -352
+            AppLog.w(TAG, "getDanmuConfig: WBI call failed code=${response.code}, refreshing keys for one retry")
+            runCatching { sessionGateway.ensureWbiKeys() }
+                .onFailure { AppLog.w(TAG, "ensureWbiKeys retry failed: ${it.message}") }
+            val (newImgKey, newSubKey) = sessionGateway.getWbiKeys()
+            response = apiService.getLiveDanmuInfoSigned(
+                WbiGenerator.generateWbiParams(unsignedParams, newImgKey, newSubKey)
+            )
         }
-        AppLog.w(TAG, "getDanmuConfig: WBI call failed code=${wbiResponse.code}, trying unsigned")
-
-        val response = apiService.getLiveChatRoomUrl(roomId)
-        if (response.code == 0 && response.data != null) {
-            val data = response.data
-            if (data.token.isNotBlank()) return data
+        val data = response.data
+        if (response.code == 0 && data != null && data.token.isNotBlank()) {
+            return data
         }
-        AppLog.e(TAG, "getDanmuConfig: unsigned call also failed code=${response.code} msg=${response.message}")
-
-        throw IllegalStateException("获取弹幕服务器配置失败")
+        AppLog.e(TAG, "getDanmuConfig: WBI call failed after key refresh, code=${response.code} msg=${response.message}")
+        throw IllegalStateException("获取弹幕服务器配置失败: code=${response.code}")
     }
 }

@@ -5,7 +5,7 @@ import android.view.KeyEvent
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Toast
+
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import org.koin.android.ext.android.inject
 import org.koin.androidx.viewmodel.ext.android.viewModel
+import com.mytvb.core.ui.base.AppToast
 
 class SeriesDetailFragment : Fragment() {
 
@@ -172,11 +173,11 @@ class SeriesDetailFragment : Fragment() {
                 viewModel.messages.collect { message ->
                     when (message) {
                         is SeriesDetailViewModel.UiMessage.Res -> {
-                            Toast.makeText(requireContext(), message.resId, Toast.LENGTH_SHORT).show()
+                            AppToast.show(requireContext(), message.resId)
                         }
 
                         is SeriesDetailViewModel.UiMessage.Text -> {
-                            Toast.makeText(requireContext(), message.value, Toast.LENGTH_SHORT).show()
+                            AppToast.show(requireContext(), message.value)
                         }
                     }
                 }
@@ -228,7 +229,7 @@ class SeriesDetailFragment : Fragment() {
         val targetSeasonId = series.seasonId
         if (targetSeasonId <= 0) return
         if (targetSeasonId == currentDetail?.seasonId) {
-            Toast.makeText(requireContext(), R.string.series_already_open, Toast.LENGTH_SHORT).show()
+            AppToast.show(requireContext(), R.string.series_already_open)
             return
         }
         pendingPrimaryFocus = true

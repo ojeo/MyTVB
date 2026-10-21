@@ -46,6 +46,18 @@ object TabContentFocusHelper {
             )
         }
 
+        // 触摸模式下卡片非 focusableInTouchMode（项目方针：touch mode 统一不聚焦），
+        // 下面两轮 requestFocus 必然失败，落到 fallback 只会 scrollToPosition(0) 把
+        // 用户滑动到的位置顶回顶部——触摸进播放器返回列表即回顶的根因，直接短路。
+        if (recyclerView.isInTouchMode) {
+            return RecyclerFocusResult(
+                handled = false,
+                deferred = false,
+                position = RecyclerView.NO_POSITION,
+                source = "touchMode"
+            )
+        }
+
         val layoutManager = recyclerView.layoutManager as? LinearLayoutManager
         val firstVisiblePosition = layoutManager?.findFirstVisibleItemPosition() ?: RecyclerView.NO_POSITION
         if (firstVisiblePosition != RecyclerView.NO_POSITION) {

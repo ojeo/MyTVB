@@ -8,7 +8,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.view.WindowManager
-import android.widget.Toast
+
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDialog
 import androidx.activity.OnBackPressedCallback
@@ -27,6 +27,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import com.mytvb.core.ui.base.AppToast
 
 /**
  * 视频评论面板：贴屏幕右侧的竖版弹窗（对齐合集选集弹窗形态）。
@@ -328,7 +329,7 @@ internal class CommentPanelDialog(
         }
 
         if (item.replyCount <= 0) {
-            Toast.makeText(activity, activity.getString(R.string.player_comment_thread_empty), Toast.LENGTH_SHORT).show()
+            AppToast.show(activity, activity.getString(R.string.player_comment_thread_empty))
             return
         }
         openThread(rootRpid = item.rpid)
@@ -359,7 +360,7 @@ internal class CommentPanelDialog(
             imageViewer.open(pictures = item.pictures, startIndex = startIndex)
             return
         }
-        Toast.makeText(activity, activity.getString(R.string.player_comment_note_image_loading), Toast.LENGTH_SHORT).show()
+        AppToast.show(activity, activity.getString(R.string.player_comment_note_image_loading))
         CommentNoteImageRepository.load(item.noteCvid) { images ->
             if (!isShowing) return@load
             if (images.isEmpty()) return@load
@@ -621,7 +622,7 @@ internal class CommentPanelDialog(
     // ---------- 错误 ----------
 
     private fun showCommentLoadError(t: Throwable) {
-        Toast.makeText(activity, t.message ?: activity.getString(R.string.player_comment_load_failed), Toast.LENGTH_SHORT).show()
+        AppToast.show(activity, t.message ?: activity.getString(R.string.player_comment_load_failed))
         val rootEmpty = commentsState.items.isEmpty() && !isThreadVisible()
         val threadEmpty = isThreadVisible() && threadState.items.isEmpty()
         if (rootEmpty || threadEmpty) {

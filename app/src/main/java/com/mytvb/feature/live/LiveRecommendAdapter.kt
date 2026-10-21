@@ -67,7 +67,8 @@ class LiveRecommendAdapter(
         sharedViewPool: RecyclerView.RecycledViewPool
     ) : RecyclerView.ViewHolder(binding.root) {
 
-        private val roomAdapter = LiveRoomAdapter(onRoomClick)
+        // 推荐流开放「不想看该分区」；关注模块同样生效——不想看的分区在哪都不该再出现
+        private val roomAdapter = LiveRoomAdapter(onRoomClick, allowAreaDislike = true)
 
         init {
             // 列数须与 LiveRecommendFragment.applySections 的行高估算保持同一 adaptiveSpanCount 判定

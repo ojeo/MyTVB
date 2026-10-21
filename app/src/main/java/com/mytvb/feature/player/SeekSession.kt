@@ -46,7 +46,7 @@ class SeekSession(
         isForward = forward
         this.seekMs = seekMs
         val deltaMs = seekMs * if (forward) 1 else -1
-        val targetMs = (player.currentPosition + deltaMs).coerceIn(0L, player.duration)
+        val targetMs = (player.currentPosition + deltaMs).coerceIn(0L, seekUpperBoundMs(player.duration))
         player.seekTo(targetMs)
         danmakuSync(targetMs)
         coordinator.updateSeekPreview(targetMs, player.duration)
@@ -127,8 +127,12 @@ class SeekSession(
         if (mode == Mode.HOLD) {
             val player = playerProvider()
             if (player != null && player.isCurrentMediaItemSeekable) {
-                player.seekTo(targetPositionMs)
-                danmakuSync(targetPositionMs)
+                // startMs==0 说明首个 tick 还没跑过初始化（targetPositionMs 仍是起手 0 值）：
+                // 按下后约 200-240ms 内松手正落在这个窗口，按 0 提交=跳回片头。
+                // 用 startHoldSeek 记录的进入位置提交，行为等同"没有拖动"。
+                val targetMs = if (startMs == 0L) holdStartPositionMs else targetPositionMs
+                player.seekTo(targetMs)
+                danmakuSync(targetMs)
             }
         }
         mode = Mode.NONE
@@ -166,7 +170,7 @@ class SeekSession(
 
         val step = holdScrubStepMs(durationMs = duration, tickMs = HOLD_SCRUB_TICK_MS) *
             if (isForward) 1 else -1
-        targetPositionMs = (targetPositionMs + step).coerceIn(0L, duration)
+        targetPositionMs = (targetPositionMs + step).coerceIn(0L, seekUpperBoundMs(duration))
 
         val deltaMs = targetPositionMs - holdStartPositionMs
         coordinator.updateSeekPreview(targetPositionMs, duration)
@@ -210,6 +214,18 @@ class SeekSession(
     companion object {
         /** 长按拖动 tick 间隔，恒定不加速 */
         private const val HOLD_SCRUB_TICK_MS = 40L
+
+        /**
+         * 按键 seek 目标距片尾的安全余量：seekTo 恰好落在 duration 上会被 media3
+         * 立即判定 STATE_ENDED，触发"播完自动连播"，表现为快进顶到头的瞬间
+         * 直接切下一集、进度条从 0 开始。与 MyPlayerView/MyPlayerControlView
+         * 中的同名常量语义一致，需同步维护。
+         */
+        private const val SEEK_END_GUARD_MS = 1_000L
+
+        /** 按键 seek 的目标上限：duration 往回留一片尾安全余量，短片兜底不低于 0。 */
+        internal fun seekUpperBoundMs(durationMs: Long): Long =
+            (durationMs - SEEK_END_GUARD_MS).coerceAtLeast(0L)
 
         /** 长按走完全片所需时长（10 秒 traverse，blbl 默认值） */
         private const val HOLD_SCRUB_TRAVERSE_MS = 10_000L

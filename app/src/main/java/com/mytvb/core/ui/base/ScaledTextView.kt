@@ -14,7 +14,7 @@ import androidx.appcompat.widget.AppCompatTextView
  * （含 Kotlin 的 `textSize = x` 赋值）在 setter 中拦截，内部始终记录"原始字号"，
  * 实际应用原始字号 × 系数，重复调用不会叠加放大。
  */
-class ScaledTextView @JvmOverloads constructor(
+open class ScaledTextView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
     defStyleAttr: Int = android.R.attr.textViewStyle

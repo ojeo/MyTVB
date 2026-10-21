@@ -6,6 +6,7 @@ import android.os.Looper
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import androidx.recyclerview.widget.RecyclerView
 import com.mytvb.core.common.log.VideoCardPerfLogger
@@ -25,7 +26,9 @@ import java.util.concurrent.atomic.AtomicInteger
 class LiveRoomAdapter(
     private val onItemClick: (LiveRoomItem) -> Unit,
     private val onTopEdgeUp: (() -> Boolean)? = null,
-    private val onDpadKey: ((View, Int, KeyEvent) -> Boolean)? = null
+    private val onDpadKey: ((View, Int, KeyEvent) -> Boolean)? = null,
+    // 直播推荐流传 true，卡片菜单显示「不想看该分区」；分区详情页不提供（会清空用户正在看的列表）
+    private val allowAreaDislike: Boolean = false
 ) : RecyclerView.Adapter<LiveRoomAdapter.ViewHolder>(), TvFocusableAdapter {
 
     private val items = ArrayList<LiveRoomItem>()
@@ -83,6 +86,15 @@ class LiveRoomAdapter(
         setData(filtered)
     }
 
+    private fun removeRoomsByArea(blockedAreaName: String) {
+        val filtered = items.filter { room ->
+            val area = room.areaV2Name.ifEmpty { room.areaName }
+            !area.equals(blockedAreaName, ignoreCase = true)
+        }
+        if (filtered.size == items.size) return
+        setData(filtered)
+    }
+
     private fun removeRoom(roomId: Long) {
         val index = items.indexOfFirst { it.roomId == roomId }
         if (index < 0) return
@@ -97,7 +109,6 @@ class LiveRoomAdapter(
         private var currentItem: LiveRoomItem? = null
         private val handler = Handler(Looper.getMainLooper())
         private var longPressRunnable: Runnable? = null
-        private val longPressThreshold = 5_000L
         private var longPressTriggered = false
 
         private val keyListener = View.OnKeyListener { view, keyCode, event ->
@@ -132,10 +143,19 @@ class LiveRoomAdapter(
                     },
                     onDislikeUp = { upName ->
                         removeItemsByAnchorName(upName)
+                    },
+                    allowAreaDislike = allowAreaDislike,
+                    onDislikeArea = { areaName ->
+                        removeRoomsByArea(areaName)
                     }
                 ).show()
             }
-            handler.postDelayed(longPressRunnable!!, longPressThreshold)
+            // 与普通视频卡片(BaseVideoViewHolder)一致使用系统长按阈值，
+            // 旧值 5s 远超用户耐心，等于弹窗不可发现
+            handler.postDelayed(
+                longPressRunnable!!,
+                ViewConfiguration.getLongPressTimeout().toLong()
+            )
         }
 
         private fun cancelLongPressTimer() {
@@ -205,6 +225,8 @@ class LiveRoomAdapter(
             cover = cover,
             goto = "live",
             roomId = roomId,
+            // 分区名填入 typeName 供弹窗「不想看该分区」显示；二级分区优先，旧体系 areaName 兜底
+            typeName = areaV2Name.ifEmpty { areaName },
             owner = Owner(
                 mid = uid,
                 name = uname,

@@ -12,6 +12,33 @@ import java.io.File
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("com.google.protobuf")
+}
+
+// ── B站 app 端 gRPC 接口（热门等），proto 在 src/main/proto，lite 模式控制体积 ──
+protobuf {
+    protoc {
+        artifact = "com.google.protobuf:protoc:3.25.5"
+    }
+    plugins {
+        create("grpc") {
+            artifact = "io.grpc:protoc-gen-grpc-java:1.72.0"
+        }
+    }
+    generateProtoTasks {
+        all().forEach { task ->
+            task.builtins {
+                create("java") {
+                    option("lite")
+                }
+            }
+            task.plugins {
+                create("grpc") {
+                    option("lite")
+                }
+            }
+        }
+    }
 }
 
 abstract class FixSourceSetPathMapTask : DefaultTask() {
@@ -54,8 +81,8 @@ android {
         applicationId = (project.findProperty("applicationId") as? String) ?: "com.mytvb"
         minSdk = 23
         targetSdk = 35
-        versionCode = 97
-        versionName = "2.1.3"
+        versionCode = 107
+        versionName = "2.1.13"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -80,6 +107,18 @@ android {
         }
     }
 
+    sourceSets {
+        // protobuf-gradle-plugin 对 AGP+Kotlin 不自动挂生成源码，手动加入编译源集
+        getByName("debug") {
+            java.srcDir("build/generated/sources/proto/debug/java")
+            java.srcDir("build/generated/sources/proto/debug/grpc")
+        }
+        getByName("release") {
+            java.srcDir("build/generated/sources/proto/release/java")
+            java.srcDir("build/generated/sources/proto/release/grpc")
+        }
+    }
+
     packaging {
         resources {
             excludes += setOf(
@@ -97,7 +136,7 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    
+
     kotlinOptions {
         jvmTarget = "17"
     }
@@ -217,6 +256,9 @@ androidComponents {
 dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
+    // 文档开始前注入 JS：CCTV 播放页在老 WebView 上会因 postMessage 参数校验
+    // 抛 TypeError 中断播放器初始化，兼容补丁必须早于页面脚本执行
+    implementation("androidx.webkit:webkit:1.12.1")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.constraintlayout:constraintlayout:2.2.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
@@ -232,6 +274,12 @@ dependencies {
     // 在 Application 阶段后台异步 inflate activity_main，避免主线程 setContentView 走慢 inflate 路径。
     implementation("androidx.asynclayoutinflater:asynclayoutinflater:1.0.0")
     implementation("androidx.datastore:datastore-preferences:1.1.4")
+    // B站 app 端 gRPC（热门官方接口 grpc.biliapi.net），lite 版控制体积
+    implementation("io.grpc:grpc-okhttp:1.72.0")
+    implementation("io.grpc:grpc-protobuf-lite:1.72.0")
+    implementation("io.grpc:grpc-stub:1.72.0")
+    implementation("com.google.protobuf:protobuf-javalite:3.25.5")
+    implementation("javax.annotation:javax.annotation-api:1.3.2")
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
@@ -274,6 +322,8 @@ dependencies {
     implementation("com.google.zxing:core:3.5.2")
 
     testImplementation("junit:junit:4.13.2")
+    // 纯 JVM 单测中 stub Context 等含 final 方法的 Android 类（mockable jar 无法被子类覆写）
+    testImplementation("org.mockito:mockito-core:5.14.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.1.5")
 }

@@ -16,6 +16,10 @@ object ContentFilter {
     private const val KEY_MINOR_PROTECTION = "minor_protection"
     private const val KEY_BLOCKED_UP_NAMES = "blocked_up_names"
     private const val KEY_BLOCKED_VIDEO_KEYS = "blocked_video_keys"
+    // 直播专属黑名单：主播名/分区名。与视频侧 blocked_up_names 分开存储——
+    // 后者被 isVideoBlocked 无条件用于收藏/我的列表，直播「不感兴趣UP」若写入会连收藏夹视频一起藏掉
+    private const val KEY_BLOCKED_LIVE_ANCHORS = "blocked_live_anchors"
+    private const val KEY_BLOCKED_LIVE_AREAS = "blocked_live_areas"
 
     private val appSettings: AppSettingsDataStore get() = KoinPlatform.getKoin().get()
 
@@ -631,6 +635,52 @@ object ContentFilter {
     }
 
     @Suppress("UNUSED_PARAMETER")
+    fun getBlockedLiveAnchors(context: Context): Set<String> {
+        return appSettings.getCachedStringSet(KEY_BLOCKED_LIVE_ANCHORS)
+    }
+
+    @Suppress("UNUSED_PARAMETER")
+    fun addBlockedLiveAnchor(context: Context, name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        val existing = appSettings.getCachedStringSet(KEY_BLOCKED_LIVE_ANCHORS).toMutableSet()
+        if (existing.add(trimmed)) {
+            appSettings.putStringSetAsync(KEY_BLOCKED_LIVE_ANCHORS, existing)
+        }
+    }
+
+    @Suppress("UNUSED_PARAMETER")
+    fun removeBlockedLiveAnchor(context: Context, name: String) {
+        val existing = appSettings.getCachedStringSet(KEY_BLOCKED_LIVE_ANCHORS).toMutableSet()
+        if (existing.remove(name)) {
+            appSettings.putStringSetAsync(KEY_BLOCKED_LIVE_ANCHORS, existing)
+        }
+    }
+
+    @Suppress("UNUSED_PARAMETER")
+    fun getBlockedLiveAreas(context: Context): Set<String> {
+        return appSettings.getCachedStringSet(KEY_BLOCKED_LIVE_AREAS)
+    }
+
+    @Suppress("UNUSED_PARAMETER")
+    fun addBlockedLiveArea(context: Context, areaName: String) {
+        val trimmed = areaName.trim()
+        if (trimmed.isEmpty()) return
+        val existing = appSettings.getCachedStringSet(KEY_BLOCKED_LIVE_AREAS).toMutableSet()
+        if (existing.add(trimmed)) {
+            appSettings.putStringSetAsync(KEY_BLOCKED_LIVE_AREAS, existing)
+        }
+    }
+
+    @Suppress("UNUSED_PARAMETER")
+    fun removeBlockedLiveArea(context: Context, areaName: String) {
+        val existing = appSettings.getCachedStringSet(KEY_BLOCKED_LIVE_AREAS).toMutableSet()
+        if (existing.remove(areaName)) {
+            appSettings.putStringSetAsync(KEY_BLOCKED_LIVE_AREAS, existing)
+        }
+    }
+
+    @Suppress("UNUSED_PARAMETER")
     fun getBlockedVideoKeys(context: Context): Set<String> {
         return appSettings.getCachedStringSet(KEY_BLOCKED_VIDEO_KEYS)
     }
@@ -795,12 +845,22 @@ object ContentFilter {
     fun filterLiveRooms(context: Context, rooms: List<LiveRoomItem>): List<LiveRoomItem> {
         val t0 = SystemClock.elapsedRealtime()
         val blockedUpNames = getBlockedUpNames(context)
+        val blockedLiveAnchors = getBlockedLiveAnchors(context)
+        val blockedLiveAreas = getBlockedLiveAreas(context).mapNotNull { name ->
+            name.trim().lowercase().ifEmpty { null }
+        }.toHashSet()
         val minorProtectionEnabled = isMinorProtectionEnabled(context)
         val result = rooms.filter { room ->
             val anchorName = room.uname.trim()
             if (anchorName.isNotEmpty()) {
                 if (BLOCKED_UP_NAMES.any { it.equals(anchorName, ignoreCase = true) }) return@filter false
                 if (blockedUpNames.any { it.equals(anchorName, ignoreCase = true) }) return@filter false
+                if (blockedLiveAnchors.any { it.equals(anchorName, ignoreCase = true) }) return@filter false
+            }
+            // 用户主动屏蔽的分区始终生效，不受青少年模式开关控制
+            if (blockedLiveAreas.isNotEmpty()) {
+                val areaLower = room.areaV2Name.ifEmpty { room.areaName }.trim().lowercase()
+                if (areaLower.isNotEmpty() && areaLower in blockedLiveAreas) return@filter false
             }
             if (!minorProtectionEnabled) return@filter true
             val areaLower = room.areaV2Name.ifEmpty { room.areaName }.trim().lowercase()

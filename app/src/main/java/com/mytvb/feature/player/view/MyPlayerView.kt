@@ -59,11 +59,14 @@ import com.mytvb.feature.player.LiveQualityInfo
 import com.mytvb.feature.player.PlaybackStartupTrace
 import com.mytvb.feature.player.danmaku.BlblDanmakuController
 import com.mytvb.feature.player.danmaku.DanmakuView
+import com.mytvb.feature.player.danmaku.LiveSuperChatSignal
 import com.mytvb.feature.player.danmaku.common.DanmakuSettingsSnapshot
 import com.mytvb.feature.player.danmaku.common.DanmakuController
 import com.mytvb.feature.player.danmaku.common.LiveDanmakuController
 import com.mytvb.feature.player.DanmakuFilterContext
 import com.mytvb.feature.player.sponsor.SponsorSegment
+import com.mytvb.feature.player.viewpoint.NormalizedViewPointSegment
+import com.mytvb.feature.player.viewpoint.ViewPointSegments
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -177,6 +180,8 @@ class MyPlayerView @JvmOverloads constructor(
     private var pendingSimpleKeyPressEnabled: Boolean? = null
     private var pendingEpisodeNavigationEnabled: Pair<Boolean, Boolean>? = null
     private var pendingDmSwitchVisible: Boolean? = null
+    private var pendingScSwitchVisible: Boolean? = null
+    private var pendingScSwitchEnabled: Boolean? = null
     private var pendingMirrorVisible: Boolean? = null
     private var pendingPlaySpeedButtonVisible: Boolean? = null
     private var pendingNextPreviousVisible: Boolean? = null
@@ -197,6 +202,8 @@ class MyPlayerView @JvmOverloads constructor(
     private var pendingSeekPreviewSnapshot: VideoSnapshotData? = null
     private var pendingSponsorSegments: List<SponsorSegment> = emptyList()
     private var pendingSponsorDurationMs: Long = 0L
+    private var pendingViewPointSegments: List<NormalizedViewPointSegment> = emptyList()
+    private var pendingViewPointDurationMs: Long = 0L
     private var pendingDmMaskRequest: DmMaskRequest? = null
 
     private var touchInterceptListener: ((MotionEvent) -> Boolean)? = null
@@ -722,6 +729,8 @@ class MyPlayerView @JvmOverloads constructor(
         pendingSimpleKeyPressEnabled?.let(target::setSimpleKeyPressEnabled)
         pendingEpisodeNavigationEnabled?.let { target.setEpisodeNavigationEnabled(it.first, it.second) }
         pendingDmSwitchVisible?.let(target::showHideDmSwitchButton)
+        pendingScSwitchVisible?.let(target::showHideScSwitchButton)
+        pendingScSwitchEnabled?.let(target::scSwitchButtonChange)
         pendingMirrorVisible?.let(target::showHideMirrorButton)
         pendingPlaySpeedButtonVisible?.let(target::showHidePlaySpeedButton)
         pendingNextPreviousVisible?.let(target::showHideNextPrevious)
@@ -741,6 +750,12 @@ class MyPlayerView @JvmOverloads constructor(
         pendingOwnerButtonVisible?.let(target::setShowHideOwnerButton)
         target.setSponsorSegments(pendingSponsorSegments)
         target.setSponsorDuration(pendingSponsorDurationMs)
+        target.setViewPointSegments(pendingViewPointSegments)
+        target.setViewPointDuration(pendingViewPointDurationMs)
+        // 控制栏弹幕图标初值必须跟随设置项。MyPlayerControlView.dmEnabled 的类默认是 true，
+        // 若设置里弹幕为「关」，图标会显示成「开」且内部布尔与设置错位，导致要「关→再开」
+        // 两次才真正打开弹幕（第一次只是把错位的局部状态对齐）。此处按设置面板的真实值初始化。
+        target.dmEnableButtonChange(settingView?.getDmEnable() ?: true)
     }
 
     private fun setupSettingView() {
@@ -1193,6 +1208,7 @@ class MyPlayerView @JvmOverloads constructor(
         handleDoubleTapModeKeys(event)?.let { return it }
         handleOkLongPressSpeedKeys(event)?.let { return it }
         handleControllerDpadKeys(event)?.let { return it }
+        handleChapterPanelKeys(event)?.let { return it }
         return dispatchMediaAndSuperFallbackKeys(event)
     }
 
@@ -1530,13 +1546,20 @@ class MyPlayerView @JvmOverloads constructor(
                 return handleSeekSessionKeyEvent(event)
             }
         }
-        // 控制栏可见且焦点在进度条（最上一行）时，UP 直接收起控制栏，与返回键等效
+        // 控制栏可见且焦点在进度条（最上一行）时：有章节条则 UP 聚焦章节条（层级上它
+        // 就在进度条上方），否则维持原行为收起控制栏（与返回键等效）
         if (controllerVisible
             && event.keyCode == KeyEvent.KEYCODE_DPAD_UP
             && event.action == KeyEvent.ACTION_DOWN
             && controller?.isTimebarFocused() == true
         ) {
-            hideController()
+            if (controller?.isChapterEntryVisible() == true) {
+                AppLog.d("PlayerViewPerf", "viewpoints_trace up_to_chapter_entry")
+                controller?.requestChapterEntryFocus()
+            } else {
+                AppLog.d("PlayerViewPerf", "viewpoints_trace up_hide_controller entryVisible=false")
+                hideController()
+            }
             return true
         }
         // 对齐 blbl：控制栏可见时 UP 显式聚焦进度条（blbl UP = focusSeekBar）。
@@ -1816,7 +1839,8 @@ class MyPlayerView @JvmOverloads constructor(
         }
 
         tapAccumulateDeltaMs += 10_000L * if (forward) 1 else -1
-        val targetMs = (tapAccumulateBaseMs + tapAccumulateDeltaMs).coerceIn(0L, duration)
+        val targetMs = (tapAccumulateBaseMs + tapAccumulateDeltaMs)
+            .coerceIn(0L, com.mytvb.feature.player.SeekSession.seekUpperBoundMs(duration))
 
         controller?.beginSeekPreview(targetMs)
         showTimelineThumbPreview(targetMs, duration)
@@ -1834,10 +1858,15 @@ class MyPlayerView @JvmOverloads constructor(
         val commitRunnable = Runnable {
             val p = player ?: return@Runnable
             val wasTimebarSeek = timebarSeekActive
-            val finalTarget = (tapAccumulateBaseMs + tapAccumulateDeltaMs).coerceIn(0L, p.duration.coerceAtLeast(0L))
-            p.seekTo(finalTarget)
-            onUserSeekListener?.invoke(finalTarget)
-            syncDanmakuPosition(finalTarget, forceSeek = true)
+            // duration 暂不可用（切集/换流窗口期）时放弃本次提交：
+            // 若照旧钳值会上限退化成 0，seekTo(0) 凭空跳回片头
+            if (p.duration > 0L) {
+                val finalTarget = (tapAccumulateBaseMs + tapAccumulateDeltaMs)
+                    .coerceIn(0L, com.mytvb.feature.player.SeekSession.seekUpperBoundMs(p.duration))
+                p.seekTo(finalTarget)
+                onUserSeekListener?.invoke(finalTarget)
+                syncDanmakuPosition(finalTarget, forceSeek = true)
+            }
             if (wasTimebarSeek) {
                 // timebar 场景焦点始终在进度条上、语义是完整控制栏：恢复信息层即可
                 // （finishSeekPreviewProgressOnly 在持久细条模式下会 exit 整个控制器，
@@ -1914,15 +1943,28 @@ class MyPlayerView @JvmOverloads constructor(
             cancelPendingTimebarHoldStart()
             cancelTimebarSeekLoop()
             if (holdStarted) {
-                // Short press: accumulate, don't start idle (commit will clean up)
-                handleTapAccumulate(forward)
+                // Short press: 有章节时直接跨章跳转；无章节回落 ±10s 轻点累积
+                if (trySeekChapter(forward)) {
+                    resetTapAccumulate()
+                } else {
+                    handleTapAccumulate(forward)
+                }
             } else {
                 // Long press: clear tap accumulation, seek to target
                 resetTapAccumulate()
-                if (timebarSeekActive && player != null) {
-                    player?.seekTo(timebarSeekTargetMs)
-                    onUserSeekListener?.invoke(timebarSeekTargetMs)
-                    syncDanmakuPosition(timebarSeekTargetMs, forceSeek = true)
+                val currentPlayer = player
+                if (timebarSeekActive && currentPlayer != null) {
+                    // startMs==0 说明 tick 循环从未初始化目标（首 tick 前松手，或起播
+                    // duration<=0 时 tick 全部早退），target 仍是 0 值，按 0 提交=跳回片头；
+                    // 落到当前位置，行为等同"没有拖动"
+                    val targetMs = if (timebarSeekStartMs == 0L) {
+                        currentPlayer.currentPosition
+                    } else {
+                        timebarSeekTargetMs
+                    }
+                    currentPlayer.seekTo(targetMs)
+                    onUserSeekListener?.invoke(targetMs)
+                    syncDanmakuPosition(targetMs, forceSeek = true)
                 }
                 if (endHoldPlaybackFreeze()) {
                     resumeDanmaku()
@@ -1941,6 +1983,54 @@ class MyPlayerView @JvmOverloads constructor(
         pendingTimebarHoldStartRunnable = null
     }
 
+    /**
+     * 焦点在进度条（非拖动预览中）按 OK/ENTER：打开章节选择弹窗。
+     * 拖动预览（scrubbing）中的 OK 是确认 seek，放行给 timebar；
+     * 无章节/无监听返回 null 走默认路径（如播放暂停）。
+     */
+    private fun handleChapterPanelKeys(event: KeyEvent): Boolean? {
+        if (event.action != KeyEvent.ACTION_DOWN) return null
+        if (event.keyCode != KeyEvent.KEYCODE_DPAD_CENTER && event.keyCode != KeyEvent.KEYCODE_ENTER) return null
+        val dropReason = when {
+            pendingViewPointSegments.isEmpty() -> "empty_segments"
+            onChapterPanelRequestListener == null -> "no_listener"
+            controller?.isFullyVisible() != true -> "controller_hidden"
+            controller?.isTimebarFocused() != true -> "timebar_not_focused"
+            controller?.isScrubbingTimeBar() == true -> "scrubbing"
+            else -> null
+        }
+        if (dropReason != null) {
+            AppLog.d("PlayerViewPerf", "viewpoints_trace panel_key_drop reason=$dropReason")
+            return null
+        }
+        onChapterPanelRequestListener!!.invoke()
+        return true
+    }
+
+    /**
+     * 焦点在进度条时短按 ←/→ 的跨章跳转：seek 到上一章/下一章起点并按
+     * 长按提交同款路径收尾（弹幕强同步 + 缩略图淡出 + 1s 后恢复控制栏）。
+     * 无章节或无可跳目标（如已在第一章内按"上一章"）返回 false，
+     * 调用方回落到 ±10s 轻点累积快进退。
+     */
+    private fun trySeekChapter(forward: Boolean): Boolean {
+        val segments = pendingViewPointSegments
+        if (segments.isEmpty()) return false
+        val currentPlayer = player ?: return false
+        val targetMs = ViewPointSegments.seekChapterMs(
+            segments,
+            currentPlayer.currentPosition,
+            forward
+        ) ?: return false
+        currentPlayer.seekTo(targetMs)
+        onUserSeekListener?.invoke(targetMs)
+        syncDanmakuPosition(targetMs, forceSeek = true)
+        controller?.cancelSeekPreview()
+        timelineThumbPreview?.hideAfter(500L)
+        startTimebarSeekIdle()
+        return true
+    }
+
     private fun doTimebarSeekTick() {
         val currentPlayer = player ?: return
         val duration = currentPlayer.duration
@@ -1954,7 +2044,8 @@ class MyPlayerView @JvmOverloads constructor(
         // 步长按片长自适应：长按 timebarSeekTraverseMs 走完全片（与 UI 隐藏长按
         // 路径同一模型），替代原固定 60s 步长（30 分钟剧 3 秒后即 2000s/s，快进过头）
         val step = timebarScrubStepMs(durationMs = duration) * if (timebarSeekForward) 1 else -1
-        timebarSeekTargetMs = (timebarSeekTargetMs + step).coerceIn(0L, duration)
+        timebarSeekTargetMs = (timebarSeekTargetMs + step)
+            .coerceIn(0L, com.mytvb.feature.player.SeekSession.seekUpperBoundMs(duration))
 
         controller?.beginSeekPreview(timebarSeekTargetMs)
         // blbl 形态：缩略图浮窗跟随进度条滑块（不是中央 overlay）
@@ -2527,6 +2618,10 @@ class MyPlayerView @JvmOverloads constructor(
         settingView?.setCurrentVideoCodec(videoCodec)
     }
 
+    fun setSoftwareDecoderEnabled(enabled: Boolean) {
+        settingView?.setSoftwareDecoderEnabled(enabled)
+    }
+
     fun selectSubtitle(position: Int) {
         settingView?.setCurrentSubtitlePosition(position)
     }
@@ -2590,6 +2685,16 @@ class MyPlayerView @JvmOverloads constructor(
     fun showHideDmSwitchButton(show: Boolean) {
         pendingDmSwitchVisible = show
         controller?.showHideDmSwitchButton(show)
+    }
+
+    fun showHideScSwitchButton(show: Boolean) {
+        pendingScSwitchVisible = show
+        controller?.showHideScSwitchButton(show)
+    }
+
+    fun scSwitchButtonChange(enabled: Boolean) {
+        pendingScSwitchEnabled = enabled
+        controller?.scSwitchButtonChange(enabled)
     }
 
     fun showHidePlaySpeedButton(show: Boolean) {
@@ -2688,6 +2793,7 @@ class MyPlayerView @JvmOverloads constructor(
     private fun restoreOverlayZOrder() {
         val controllerLayer: View? = controller ?: findViewById<View>(R.id.exo_controller_placeholder)
         dmkMaskHost?.bringToFront()
+        findViewById<View>(R.id.super_chat_host)?.bringToFront()
         findViewById<View>(R.id.interaction_view)?.bringToFront()
         pauseIndicatorView?.bringToFront()
         douyinPreviewLayer?.bringToFront()
@@ -2697,6 +2803,8 @@ class MyPlayerView @JvmOverloads constructor(
         settingView?.bringToFront()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             dmkMaskHost?.translationZ = 1f
+            // SC 卡片在弹幕层之上、其余浮层之下
+            findViewById<View>(R.id.super_chat_host)?.translationZ = 1.5f
             findViewById<View>(R.id.interaction_view)?.translationZ = 2f
             pauseIndicatorView?.translationZ = 3f
             douyinPreviewLayer?.translationZ = 4f
@@ -2731,7 +2839,11 @@ class MyPlayerView @JvmOverloads constructor(
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             isFocusable = false
-            isClickable = false
+            isClickable = true
+            setOnClickListener {
+                // 触摸屏上点击整条提示等同于按返回键：取消进度恢复并从头播放
+                onResumeProgressCancelled?.invoke()
+            }
             alpha = 1f
             visibility = GONE
             setPadding(dp(10), dp(5), dp(10), dp(5))
@@ -2842,6 +2954,15 @@ class MyPlayerView @JvmOverloads constructor(
     fun requestEpisodeButtonFocus() {
         controller?.requestEpisodeButtonFocus()
     }
+
+    fun requestChapterEntryFocus() {
+        controller?.requestChapterEntryFocus()
+    }
+
+    fun isChapterEntryVisible(): Boolean = controller?.isChapterEntryVisible() == true
+
+    /** 焦点在进度条时按 OK：请求宿主打开章节选择弹窗（由 Activity/Fragment 设置）。 */
+    var onChapterPanelRequestListener: (() -> Unit)? = null
 
     fun showHideActionButton(show: Boolean) {
         pendingActionButtonVisible = show
@@ -3211,6 +3332,19 @@ class MyPlayerView @JvmOverloads constructor(
         controller?.setSponsorDuration(durationMs)
     }
 
+    fun setViewPointSegments(segments: List<NormalizedViewPointSegment>) {
+        pendingViewPointSegments = segments
+        controller?.setViewPointSegments(segments)
+    }
+
+    fun setViewPointDuration(durationMs: Long) {
+        pendingViewPointDurationMs = durationMs
+        controller?.setViewPointDuration(durationMs)
+    }
+
+    /** 当前已归一化的章节分段（供跳章按键读取；controller 未就绪时读 pending）。 */
+    fun getViewPointSegments(): List<NormalizedViewPointSegment> = pendingViewPointSegments
+
     /**
      * 创建弹幕引擎（性能优先轻量引擎，唯一实现）。需在 setData 之前、播放器 setup 时调用，
      * 保证引擎收到播放起始位置/首帧等早期通知；幂等，可安全重复调用。
@@ -3266,6 +3400,37 @@ class MyPlayerView @JvmOverloads constructor(
 
     fun addLiveDanmaku(dm: DmModel) {
         activeLiveDanmakuController()?.addLiveDanmaku(dm)
+    }
+
+    // ---- 直播 SC（醒目留言）卡片 ----
+
+    private fun superChatHost(): LiveSuperChatHostView? = findViewById(R.id.super_chat_host)
+
+    /** SC 开关：关＝隐藏并清空队列（SC 与弹幕开关联动由调用方决定，此处只管可见性）。 */
+    fun setLiveSuperChatEnabled(enabled: Boolean) {
+        val host = superChatHost() ?: return
+        scSwitchButtonChange(enabled)
+        if (enabled) {
+            if (host.visibility != View.VISIBLE) {
+                host.visibility = View.VISIBLE
+                restoreOverlayZOrder()
+            }
+        } else {
+            host.visibility = View.GONE
+            host.clear()
+        }
+    }
+
+    fun showLiveSuperChat(signal: LiveSuperChatSignal.New) {
+        superChatHost()?.show(signal)
+    }
+
+    fun removeLiveSuperChat(id: Long) {
+        superChatHost()?.remove(id)
+    }
+
+    fun clearLiveSuperChat() {
+        superChatHost()?.clear()
     }
 
     fun setDanmakuEnabled(enabled: Boolean) {
@@ -3446,6 +3611,9 @@ class MyPlayerView @JvmOverloads constructor(
 
     private fun syncDanmakuSettings() {
         val snapshot = buildDanmakuSettingsSnapshot()
+        // 弹幕数据/设置每次落地时把控制栏图标对齐到真实开关值，兜住控制器晚于设置面板
+        // 创建的路径（见 applyPendingControllerState 的双保险）。
+        controller?.dmEnableButtonChange(snapshot.enabled)
         dmMaskController.setDanmakuVisible(snapshot.enabled)
         updateVideoFrameRateStrategy(snapshot.enabled)
         activeDanmakuController()?.applySettings(snapshot)

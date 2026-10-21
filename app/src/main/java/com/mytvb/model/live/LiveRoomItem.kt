@@ -59,10 +59,11 @@ data class LiveRoomItem(
                 textLarge = wsObj.optString("text_large", "")
             ) else null
             return LiveRoomItem(
-                roomId = obj.optLong("roomid", 0),
+                // 关注列表接口(GetAttentionListInfo)用 room_id,首页模块用 roomid
+                roomId = obj.optLong("roomid", obj.optLong("room_id", 0)),
                 uid = obj.optLong("uid", 0),
                 title = obj.optString("title", ""),
-                cover = obj.optString("cover", ""),
+                cover = obj.optString("cover", "").ifEmpty { obj.optString("cover_from_user", "") },
                 userCover = obj.optString("user_cover", ""),
                 keyframe = obj.optString("keyframe", ""),
                 face = obj.optString("face", ""),

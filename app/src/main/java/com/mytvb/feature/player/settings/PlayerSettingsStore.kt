@@ -1,7 +1,9 @@
 package com.mytvb.feature.player.settings
 
 import android.content.Context
+import com.mytvb.core.common.media.VideoCodecSupport
 import com.mytvb.core.common.settings.AppSettingsDataStore
+import com.mytvb.feature.player.speed.PlaybackSpeedPolicy
 import com.mytvb.model.video.quality.AudioQuality
 import com.mytvb.model.video.quality.VideoCodecEnum
 import org.koin.mp.KoinPlatform
@@ -32,6 +34,12 @@ data class PlayerSettings(
     val subtitlePreferredLan: String = "",
     val subtitleTextSizePx: Int = 45,
     val showBottomProgressBar: Boolean = false,
+    // 播放页左下角「N人正在看」浮层：关闭后不拉取在线人数也不显示。默认开。
+    val showOnlineWatching: Boolean = true,
+    // 章节/看点条（view_points）：进度条分段高亮、章节名、跨章跳转与章节面板的总开关。默认关。
+    val showChapterBar: Boolean = false,
+    // 直播 SC（醒目留言）左侧卡片队列：关闭后 WS 仍接收但不显示。默认开。
+    val showLiveSuperChat: Boolean = true,
     val simpleKeyPress: Boolean = false,
     val showRewindFastForward: Boolean = false,
     val showNextPrevious: Boolean = false,
@@ -44,7 +52,7 @@ data class PlayerSettings(
     val musicZoneNormalSpeed: Boolean = false,
     val fastSeekSeconds: Int = 10,
     val resumePlayback: Boolean = true,
-    val sponsorBlockEnabled: Boolean = false,
+    val sponsorBlockEnabled: Boolean = true,
     val sponsorBlockAutoSkip: Boolean = true,
     // 音量均衡：PCM 级自适应响度归一（VolumeBalanceAudioProcessor），关/低/中/高四档。
     // 取代旧的系统音效方案（DynamicsProcessing/LoudnessEnhancer——部分 TV 设备驱动有 bug 会失真）。默认中档。
@@ -70,6 +78,14 @@ object PlayerSettingsStore {
     private const val KEY_DEFAULT_AUDIO_TRACK = "default_audio_track"
     private const val KEY_DEFAULT_PLAY_SPEED = "default_play_speed"
     private const val KEY_VIDEO_CODEC = "video_codec"
+    // 与 SettingsFragment.KEY_SOFTWARE_VIDEO_DECODER 同键；存储值"开/关"（parseToggle 口径）。
+    const val KEY_SOFTWARE_VIDEO_DECODER = "software_video_decoder"
+    // 与 SettingsFragment.KEY_SHOW_ONLINE_WATCHING 同键；存储值"开/关"（parseToggle 口径），默认开。
+    const val KEY_SHOW_ONLINE_WATCHING = "show_online_watching"
+    // 与 SettingsFragment.KEY_SHOW_LIVE_SUPER_CHAT 同键；存储值"开/关"（parseToggle 口径），默认开。
+    const val KEY_SHOW_LIVE_SUPER_CHAT = "show_live_super_chat"
+    // 与 SettingsFragment.KEY_SHOW_CHAPTER_BAR 同键；存储值"开/关"（parseToggle 口径），默认关。
+    const val KEY_SHOW_CHAPTER_BAR = "show_chapter_bar"
     private const val KEY_AFTER_PLAY = "after_play"
     private const val KEY_PLAY_FINISH_EXIT_PLAYER = "play_finish_exit_player"
     private const val KEY_SUBTITLE_DEFAULT_MODE = "subtitle_default_mode"
@@ -142,6 +158,10 @@ object PlayerSettingsStore {
             append(readSetting(KEY_AUDIO_BALANCE).orEmpty())
             append("|")
             append(readSetting(KEY_SEAMLESS_QUALITY_SWITCH).orEmpty())
+            append("|")
+            append(readSetting(KEY_SHOW_LIVE_SUPER_CHAT).orEmpty())
+            append("|")
+            append(readSetting(KEY_SHOW_CHAPTER_BAR).orEmpty())
         }
         if (snapshot == lastSettingsSnapshot) {
             return cachedSettings!!
@@ -153,12 +173,15 @@ object PlayerSettingsStore {
             defaultAudioQualityId = parseAudioQualityId(
                 readSetting(KEY_DEFAULT_AUDIO_TRACK)
             ),
-            defaultPlaybackSpeed = readSetting(KEY_DEFAULT_PLAY_SPEED)
-                ?.toFloatOrNull()
-                ?.takeIf { it > 0f }
-                ?: 1.0f,
+            defaultPlaybackSpeed = PlaybackSpeedPolicy.nearestPlaybackSpeed(
+                readSetting(KEY_DEFAULT_PLAY_SPEED)
+                    ?.toFloatOrNull()
+                    ?.takeIf { it > 0f }
+                    ?: 1.0f
+            ),
             defaultVideoCodec = parseVideoCodec(
-                readSetting(KEY_VIDEO_CODEC)
+                readSetting(KEY_VIDEO_CODEC),
+                context
             ),
             afterPlayMode = when (readSetting(KEY_AFTER_PLAY)) {
                 "什么都不做" -> AfterPlayMode.NOTHING
@@ -184,6 +207,18 @@ object PlayerSettingsStore {
                 ?: 45,
             showBottomProgressBar = parseToggle(
                 readSetting(KEY_SHOW_BOTTOM_PROGRESS_BAR),
+                defaultValue = false
+            ),
+            showOnlineWatching = parseToggle(
+                readSetting(KEY_SHOW_ONLINE_WATCHING),
+                defaultValue = true
+            ),
+            showLiveSuperChat = parseToggle(
+                readSetting(KEY_SHOW_LIVE_SUPER_CHAT),
+                defaultValue = true
+            ),
+            showChapterBar = parseToggle(
+                readSetting(KEY_SHOW_CHAPTER_BAR),
                 defaultValue = false
             ),
             simpleKeyPress = parseToggle(
@@ -226,7 +261,7 @@ object PlayerSettingsStore {
             ),
             sponsorBlockEnabled = parseToggle(
                 readSetting(KEY_SPONSOR_BLOCK_ENABLED),
-                defaultValue = false
+                defaultValue = true
             ),
             sponsorBlockAutoSkip = parseToggle(
                 readSetting(KEY_SPONSOR_BLOCK_AUTO_SKIP),
@@ -259,6 +294,14 @@ object PlayerSettingsStore {
         if (cachedSettings?.subtitlePreferredLan == normalized) return
         appSettings.putStringAsync(KEY_SUBTITLE_PREFERRED_LAN, normalized)
         cachedSettings = cachedSettings?.copy(subtitlePreferredLan = normalized)
+        lastSettingsSnapshot = null
+    }
+
+    /** 播放页 SC 开关按钮切换即时落盘（存储值「开/关」，与设置页 toggle 同口径）。 */
+    fun saveShowLiveSuperChat(enabled: Boolean) {
+        if (cachedSettings?.showLiveSuperChat == enabled) return
+        appSettings.putStringAsync(KEY_SHOW_LIVE_SUPER_CHAT, if (enabled) "开" else "关")
+        cachedSettings = cachedSettings?.copy(showLiveSuperChat = enabled)
         lastSettingsSnapshot = null
     }
 
@@ -305,14 +348,27 @@ object PlayerSettingsStore {
         }
     }
 
-    private fun parseVideoCodec(value: String?): VideoCodecEnum? {
+    private fun parseVideoCodec(value: String?, context: Context): VideoCodecEnum? {
         return when (value?.trim()?.uppercase()) {
-            null, "" -> VideoCodecEnum.HEVC
+            null, "" -> VideoCodecSupport.defaultPreferredCodec(context)
             "AVC", "H.264", "H264" -> VideoCodecEnum.AVC
             "HEVC", "H.265", "H265" -> VideoCodecEnum.HEVC
             "AV1" -> VideoCodecEnum.AV1
-            else -> VideoCodecEnum.HEVC
+            else -> VideoCodecSupport.defaultPreferredCodec(context)
         }
+    }
+
+    // ===== 解码方式（硬解优先 / 软解） =====
+
+    /**
+     * 软解开关（实时读内存缓存，播放器 selector/能力预检每次询问都会调用）。
+     * 未设置过视为"关"= 硬解优先。
+     */
+    fun isSoftwareDecoderEnabled(): Boolean =
+        appSettings.getCachedString(KEY_SOFTWARE_VIDEO_DECODER) == "开"
+
+    fun saveSoftwareDecoderEnabled(enabled: Boolean) {
+        appSettings.putStringAsync(KEY_SOFTWARE_VIDEO_DECODER, if (enabled) "开" else "关")
     }
 
     private fun parseToggle(value: String?, defaultValue: Boolean): Boolean {

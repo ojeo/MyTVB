@@ -11,6 +11,7 @@ interface OnPlayerSettingChange {
     fun onPlaybackSpeedChange(speed: Float)
     fun onSubtitleChange(position: Int)
     fun onVideoCodecChange(codec: VideoCodecEnum)
+    fun onSoftwareDecoderChange(enabled: Boolean) {}
     fun onAspectRatioChange(ratio: Int)
     fun onScreenMirrorChange(enabled: Boolean) {}
     fun onLiveQualityChange(qn: Int) {}

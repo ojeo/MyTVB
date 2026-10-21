@@ -101,6 +101,8 @@
     <string name="model_series_variety">综艺</string>
     <string name="model_search_order_total_rank">综合排序</string>
     <string name="model_search_order_click">最多点击</string>
+    <string name="space_order_most_played">最多播放</string>
+    <string name="space_sort_oldest_first">最早发布</string>
     <string name="model_search_order_pub_date">最新发布</string>
     <string name="model_search_order_dm">最多弹幕</string>
     <string name="model_search_order_most_collection">最多收藏</string>
@@ -131,13 +133,6 @@
     <string name="x5_install_failed_code_format">安装失败(code:%1$d)，点击重试</string>
     <string name="x5_install_unsupported">安装后 canLoadX5 仍为 false，可能设备不支持</string>
     <string name="x5_install_error_format">安装异常: %1$s</string>
-
-    <!-- ===== debug：调试日志页 ===== -->
-    <string name="debug_export">导出</string>
-    <string name="debug_export_success">导出成功</string>
-    <string name="debug_export_success_message_format">日志已保存到：\n%1$s\n\n可用文件管理器进入该路径查看，或用 adb pull 取出。</string>
-    <string name="debug_export_failed_format">导出失败: %1$s</string>
-    <string name="debug_got_it">知道了</string>
 
     <!-- ===== layout 占位/标题 ===== -->
     <string name="cell_title_placeholder">标题标题标题标题标题标题标题标题标题</string>

@@ -47,6 +47,9 @@ class LiveDanmakuClient(
     private val _danmakuMessages = MutableSharedFlow<LiveDanmakuMessage>(extraBufferCapacity = 64)
     val danmakuMessages: SharedFlow<LiveDanmakuMessage> = _danmakuMessages.asSharedFlow()
 
+    private val _superChatSignals = MutableSharedFlow<LiveSuperChatSignal>(extraBufferCapacity = 16)
+    val superChatSignals: SharedFlow<LiveSuperChatSignal> = _superChatSignals.asSharedFlow()
+
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
@@ -233,9 +236,71 @@ class LiveDanmakuClient(
                     )
                 )
                 AppLog.d(TAG, "DANMU emitted=$emitted")
+            } else if (cmd == "SUPER_CHAT_MESSAGE") {
+                handleSuperChatMessage(obj.optJSONObject("data"))
+            } else if (cmd == "SUPER_CHAT_MESSAGE_DELETE") {
+                val data = obj.optJSONObject("data") ?: return
+                val id = data.optLong("id", -1L)
+                if (id > 0) {
+                    _superChatSignals.tryEmit(LiveSuperChatSignal.Delete(id))
+                }
             }
         } catch (e: Exception) {
             AppLog.w(TAG, "handleSingleCommand error: ${e.message}")
+        }
+    }
+
+    /** SC 字段形态官方文档未公开，background_color 实测有十进制 int 与 hex 字符串两种，解析全部兜底并打日志供真机校验。 */
+    private fun handleSuperChatMessage(data: JSONObject?) {
+        if (data == null) return
+        val message = data.optString("message", "")
+        if (message.isBlank()) return
+
+        val userInfo = data.optJSONObject("user_info")
+        val userName = userInfo?.optString("uname", "").orEmpty().ifBlank { "匿名" }
+        val avatarUrl = userInfo?.optString("face", "").orEmpty()
+        val avatarFrameUrl = userInfo?.optString("face_frame", "").orEmpty()
+
+        val price = data.optLong("price", 0L)
+        // time 为 SC 总时长（秒）；缺失时用 end_time - start_time 兜底，再不行给 60s
+        val durationSec = when {
+            data.optLong("time", 0L) > 0 -> data.optLong("time")
+            data.optLong("end_time", 0L) > 0 && data.optLong("start_time", 0L) > 0 ->
+                data.optLong("end_time") - data.optLong("start_time")
+            else -> 60L
+        }.coerceIn(5L, 3600L)
+
+        val backgroundColor = parseSuperChatColor(data.opt("background_color"))
+
+        AppLog.i(
+            TAG,
+            "SUPER_CHAT: id=${data.optLong("id")} user=$userName price=$price time=${durationSec}s " +
+                "bg=#${Integer.toHexString(backgroundColor)} raw_bg=${data.opt("background_color")} data=$data"
+        )
+
+        _superChatSignals.tryEmit(
+            LiveSuperChatSignal.New(
+                id = data.optLong("id", 0L),
+                userName = userName,
+                avatarUrl = avatarUrl,
+                message = message,
+                priceYuan = price,
+                backgroundColor = backgroundColor,
+                durationSec = durationSec,
+                avatarFrameUrl = avatarFrameUrl
+            )
+        )
+    }
+
+    private fun parseSuperChatColor(raw: Any?): Int {
+        // 兜底官方 SC 蓝紫系主色，保证解析失败时卡片仍有可读底色
+        val fallback = 0xFF68C5F0.toInt()
+        return when (raw) {
+            is Int -> if (raw != 0) (0xFF000000.toInt() or raw) else fallback
+            is Long -> if (raw != 0L) (0xFF000000.toInt() or raw.toInt()) else fallback
+            is String -> raw.removePrefix("#").trim().takeIf { it.length == 6 }
+                ?.let { runCatching { (0xFF000000.toInt() or it.toInt(16)) }.getOrNull() } ?: fallback
+            else -> fallback
         }
     }
 

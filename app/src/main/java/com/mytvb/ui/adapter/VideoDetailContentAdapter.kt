@@ -29,10 +29,11 @@ import com.mytvb.databinding.CellVideoDetailHeadBinding
 import com.mytvb.model.video.VideoModel
 import com.mytvb.model.video.detail.Tag
 import com.mytvb.model.video.detail.VideoView
-import android.widget.Toast
+
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import com.mytvb.core.ui.base.AppToast
 
 class VideoDetailContentAdapter(
     private val onPlayClick: () -> Unit,
@@ -489,7 +490,7 @@ class VideoDetailContentAdapter(
             val today = SimpleDateFormat("yyyyMMdd", Locale.getDefault()).format(Date())
             if (prefs.getString("last_hint_date", "") != today) {
                 prefs.edit().putString("last_hint_date", today).apply()
-                Toast.makeText(context, R.string.adapter_triple_hint, Toast.LENGTH_SHORT).show()
+                AppToast.show(context, R.string.adapter_triple_hint)
             }
         }
 

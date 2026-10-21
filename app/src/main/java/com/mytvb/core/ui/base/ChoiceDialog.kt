@@ -1,6 +1,7 @@
 package com.mytvb.core.ui.base
 
 import android.content.Context
+import android.view.LayoutInflater
 import android.view.View
 import androidx.appcompat.app.AppCompatDialog
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -24,8 +25,15 @@ object ChoiceDialog {
         onSelected: (Int) -> Unit
     ) {
         val dialog = AppCompatDialog(context, R.style.DialogTheme)
-        dialog.setContentView(R.layout.dialog_setting_choice)
         dialog.setCanceledOnTouchOutside(true)
+        // 固定尺寸卡片（布局根 match_parent 依赖窗口定尺寸），fill 载体下显式传高
+        DialogWindowFit.overlay(
+            dialog,
+            LayoutInflater.from(context).inflate(R.layout.dialog_setting_choice, null),
+            context.resources.getDimensionPixelSize(R.dimen.px800),
+            heightPx = context.resources.getDimensionPixelSize(R.dimen.px615),
+            tag = "choice"
+        )
         dialog.findViewById<View>(R.id.dialog_root)?.setOnClickListener { dialog.dismiss() }
 
         val titleView = dialog.findViewById<android.widget.TextView>(R.id.top_title)
@@ -56,10 +64,5 @@ object ChoiceDialog {
             }
         }
         dialog.show()
-        DialogWindowFit.apply(
-            dialog.window, context,
-            context.resources.getDimensionPixelSize(R.dimen.px800),
-            context.resources.getDimensionPixelSize(R.dimen.px615)
-        )
     }
 }

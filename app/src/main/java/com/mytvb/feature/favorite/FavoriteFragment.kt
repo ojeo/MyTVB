@@ -4,7 +4,7 @@ import android.view.LayoutInflater
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Toast
+
 import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.core.os.bundleOf
 import androidx.lifecycle.Lifecycle
@@ -41,6 +41,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.koin.android.ext.android.inject
+import com.mytvb.core.ui.base.AppToast
 
 class FavoriteFragment : BaseFragment<FragmentFavoriteBinding>(), MeTabPage {
     companion object {
@@ -298,18 +299,14 @@ class FavoriteFragment : BaseFragment<FragmentFavoriteBinding>(), MeTabPage {
                     binding.tvEmpty.text = response.errorMessage
                     binding.recyclerViewFavorite.visibility = View.GONE
                     requestFallbackFocus()
-                    Toast.makeText(requireContext(), response.errorMessage, Toast.LENGTH_SHORT).show()
+                    AppToast.show(requireContext(), response.errorMessage)
                 }
             }.onFailure { e ->
                 binding.tvEmpty.visibility = View.VISIBLE
                 binding.tvEmpty.text = e.message ?: getString(R.string.net_error)
                 binding.recyclerViewFavorite.visibility = View.GONE
                 requestFallbackFocus()
-                Toast.makeText(
-                    requireContext(),
-                    getString(R.string.load_failed_format, e.message),
-                    Toast.LENGTH_SHORT
-                ).show()
+                AppToast.show(requireContext(), getString(R.string.load_failed_format, e.message))
             }
         }
     }

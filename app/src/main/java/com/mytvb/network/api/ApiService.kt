@@ -27,6 +27,7 @@ import com.mytvb.model.video.RegionVideoListWrapper
 import com.mytvb.model.video.UserDynamicResponse
 import com.mytvb.model.video.AllDynamicResponse
 import com.mytvb.model.video.GetVideoByChannelWrapper
+import com.mytvb.model.player.OnlineTotalModel
 import com.mytvb.model.player.PgcV2Result
 import com.mytvb.model.player.PlayInfoModel
 import com.mytvb.model.player.VideoSnapshotData
@@ -45,7 +46,9 @@ import com.mytvb.model.series.EpisodesDetailModel
 import com.mytvb.model.series.FollowSeriesResult
 import com.mytvb.model.series.MyFollowingResponseWrapper
 import com.mytvb.model.series.RelatedRecommendResult
+import com.mytvb.model.series.SeasonArchivesResponse
 import com.mytvb.model.series.SeasonSectionResult
+import com.mytvb.model.series.SeasonsSeriesListResponse
 import com.mytvb.model.series.timeline.GetTimeLineWrapper
 import com.mytvb.network.response.Base2Response
 import com.mytvb.network.response.BaseBaseResponse
@@ -90,13 +93,43 @@ interface ApiService {
     suspend fun getUserDynamic(
         @Query("mid") mid: Long,
         @Query("pn") page: Int,
-        @Query("ps") pageSize: Int
+        @Query("ps") pageSize: Int,
+        @Query("order") order: String = "pubdate"
     ): BaseResponse<UserDynamicResponse>
 
     @GET("x/space/wbi/arc/search")
     suspend fun getUserArcSearch(
         @QueryMap params: Map<String, String>
     ): BaseResponse<UserDynamicResponse>
+
+    /** UP 主合集与系列列表（含"直播回放"自动系列），2025+ 网页版新版接口，无需 WBI 签名。
+     *  Referer 由 HeaderInterceptor 对 web-space 路径统一置为 space.bilibili.com（必须，否则 -400）。 */
+    @GET("x/polymer/web-space/home/seasons_series")
+    suspend fun getSeasonsSeriesList(
+        @QueryMap params: Map<String, String>
+    ): BaseResponse<SeasonsSeriesListResponse>
+
+    /** 系列（series）下的投稿视频列表，返回结构与 x/space/arc/list 同构（stat 仅 view，无弹幕数） */
+    @GET("x/series/archives")
+    suspend fun getSeriesArchives(
+        @Query("mid") mid: Long,
+        @Query("series_id") seriesId: Long,
+        @Query("pn") page: Int,
+        @Query("ps") pageSize: Int,
+        @Query("sort") sort: String = "desc",
+        @Query("only_normal") onlyNormal: Boolean = true
+    ): BaseResponse<UserDynamicResponse>
+
+    /** 合集（season）下的视频列表，page 只带 total，翻页由调用方按总数计算（免签名） */
+    @GET("x/polymer/web-space/seasons_archives_list")
+    suspend fun getSeasonArchives(
+        @Query("mid") mid: Long,
+        @Query("season_id") seasonId: Long,
+        @Query("sort_reverse") sortReverse: Boolean = false,
+        @Query("page_num") page: Int,
+        @Query("page_size") pageSize: Int,
+        @Query("web_location") webLocation: String = "333.999"
+    ): BaseResponse<SeasonArchivesResponse>
 
     @GET("x/polymer/web-dynamic/desktop/v1/feed/video")
     suspend fun getAllDynamic(
@@ -144,16 +177,23 @@ interface ApiService {
         @Query("bvid") bvid: String?
     ): BaseResponse<VideoDetailModel>
 
+    /** x/web-interface/view 的 data 是平铺视频对象（非 view/detail 的 View 嵌套），用 VideoView 解析。 */
     @GET("x/web-interface/view")
     suspend fun getVideoDetailByAid(
         @Query("aid") aid: Long
-    ): BaseResponse<VideoDetailModel>
+    ): BaseResponse<com.mytvb.model.video.detail.VideoView>
 
     @GET("x/player/pagelist")
     suspend fun getVideoPv(
         @Query("avid") avid: Long?,
         @Query("bvid") bvid: String?
     ): BaseResponse<List<VideoPvModel>>
+
+    @GET("x/player/online/total")
+    suspend fun getOnlineTotal(
+        @Query("bvid") bvid: String?,
+        @Query("cid") cid: Long
+    ): BaseResponse<OnlineTotalModel>
 
     @GET("x/player/playurl")
     suspend fun getVideoPlayInfo(
@@ -450,11 +490,6 @@ interface ApiService {
     suspend fun getLiveRoomPlayInfoV2(
         @QueryMap params: Map<String, String>
     ): BaseResponse<JsonObject>
-
-    @GET("https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo")
-    suspend fun getLiveChatRoomUrl(
-        @Query("id") id: Long
-    ): BaseResponse<ChatRoomWrapper>
 
     @GET("https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo")
     suspend fun getLiveDanmuInfoSigned(

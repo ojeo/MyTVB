@@ -13,15 +13,22 @@ class HeaderInterceptor(
         val url = originalRequest.url
         val host = url.host
         val path = url.encodedPath
+        if (!isBilibiliHost(host)) return chain.proceed(originalRequest)
         val userAgent = userAgentProvider()
         val acceptLanguage = acceptLanguageProvider()
 
         val isMainSite = host == "www.bilibili.com"
         val isHtmlDocumentRequest = isMainSite && (path == "/" || path.endsWith(".html"))
-        val referer = "https://www.bilibili.com"
+        // 空间页专属接口（web-space/*）校验 Referer 必须是 space.bilibili.com，
+        // 用 www 的值会被 -400 拒掉（实测 home/seasons_series）；带 mid 时拼全路径更仿真网页版。
+        val page = resolvePageHeaders(url)
+        val referer = originalRequest.header("Referer") ?: page.referer
+        val origin = originalRequest.header("Origin")
+            ?: referer.substringBefore("://") + "://" +
+                referer.substringAfter("://").substringBefore('/')
 
         val requestBuilder = originalRequest.newBuilder()
-            .header("Origin", referer)
+            .header("Origin", origin)
             .header("Referer", referer)
             .header("User-Agent", userAgent)
             .header("Accept-Language", acceptLanguage)

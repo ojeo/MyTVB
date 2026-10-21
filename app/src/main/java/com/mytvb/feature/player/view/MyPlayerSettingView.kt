@@ -10,13 +10,14 @@ import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
 import android.widget.FrameLayout
-import android.widget.Toast
+
 import android.widget.ImageView
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.mytvb.R
 import com.mytvb.core.common.log.AppLog
 import com.mytvb.feature.player.settings.AfterPlayMode
+import com.mytvb.feature.player.speed.PlaybackSpeedPolicy
 import com.mytvb.feature.player.LiveLineInfo
 import com.mytvb.feature.player.LiveQualityInfo
 import com.mytvb.model.dm.DmScreenArea
@@ -24,6 +25,7 @@ import com.mytvb.model.subtitle.SubtitleInfoModel
 import com.mytvb.model.video.quality.AudioQuality
 import com.mytvb.model.video.quality.VideoCodecEnum
 import com.mytvb.model.video.quality.VideoQuality
+import com.mytvb.core.ui.base.AppToast
 
 class MyPlayerSettingView @JvmOverloads constructor(
     context: Context,
@@ -33,7 +35,7 @@ class MyPlayerSettingView @JvmOverloads constructor(
 
     companion object {
         private const val SETTING_FOCUS_LOG_ENABLED = false
-        internal val PLAYBACK_SPEEDS = floatArrayOf(0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f)
+        internal val PLAYBACK_SPEEDS: FloatArray = PlaybackSpeedPolicy.DEFAULT_PLAYBACK_SPEED_OPTIONS
         internal val DM_ALPHA_VALUES = floatArrayOf(0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f, 0.9f, 1.0f)
         // 30-55 为历史档位；56-100 供超宽/低密度屏（如 5120×1600）放大使用
         /** 弹幕字号档位：30~60 步进 2（16 档，视觉放大由引擎 toBlblTextScale 档位系数承担）。 */
@@ -83,6 +85,7 @@ class MyPlayerSettingView @JvmOverloads constructor(
         internal const val ITEM_LIVE_QUALITY = 8
         internal const val ITEM_LIVE_LINE = 11
         internal const val ITEM_SCREEN_MIRROR = 9
+        internal const val ITEM_DECODER_MODE = 12
         internal const val ITEM_DM_ENABLE = 101
         internal const val ITEM_DM_ALPHA = 102
         internal const val ITEM_DM_TEXT_SIZE = 103
@@ -115,6 +118,9 @@ class MyPlayerSettingView @JvmOverloads constructor(
     private var lastFocusedMainItemPosition = 1
     private var lastFocusedDmItemPosition = 1
 
+    /** 倍速子菜单是否由控制栏"播放速度"按键直入（BACK/选完档位应整体关面板而非回主菜单）。 */
+    private var speedMenuEnteredFromController = false
+
     init {
         LayoutInflater.from(context).inflate(R.layout.my_player_setting_view, this, true)
         recyclerView = findViewById(R.id.recyclerView)
@@ -146,6 +152,7 @@ class MyPlayerSettingView @JvmOverloads constructor(
     fun showHide(show: Boolean) {
         animate().cancel()
         if (!show) {
+            speedMenuEnteredFromController = false
             animate()
                 .translationX(panelWidthPx.toFloat())
                 .alpha(0f)
@@ -199,6 +206,14 @@ class MyPlayerSettingView @JvmOverloads constructor(
             }
 
             adapter.currentMenuKey == ITEM_LIVE_LINE -> {
+                showHide(false)
+                true
+            }
+
+            // 控制栏倍速按钮直入的子菜单：BACK 直接关闭整个面板，不回总设置主菜单
+            // （与直播清晰度/线路同模式）；从主菜单点进来的仍回主菜单。
+            adapter.currentMenuKey == ITEM_PLAYBACK_SPEED && speedMenuEnteredFromController -> {
+                speedMenuEnteredFromController = false
                 showHide(false)
                 true
             }
@@ -370,9 +385,11 @@ class MyPlayerSettingView @JvmOverloads constructor(
     /** 控制栏"播放速度"按键入口：直接打开倍速子菜单（面板未显示时先入场再打开）。 */
     fun showPlaybackSpeedMenu() {
         if (!isShowing()) {
+            speedMenuEnteredFromController = true
             showHide(true)
             post { showPlaybackSpeedSubMenu() }
         } else {
+            speedMenuEnteredFromController = false
             showPlaybackSpeedSubMenu()
         }
     }
@@ -501,6 +518,12 @@ class MyPlayerSettingView @JvmOverloads constructor(
         refreshCurrentMenuInPlace()
     }
 
+    /** 宿主注入软解开关当前值（设置页修改后回到播放页也能反映）。 */
+    fun setSoftwareDecoderEnabled(enabled: Boolean) {
+        updateState { it.copy(softwareDecoderEnabled = enabled) }
+        refreshCurrentMenuInPlace()
+    }
+
     fun setOnPlayerSettingChange(listener: OnPlayerSettingChange?) {
         onPlayerSettingChange = listener
     }
@@ -536,10 +559,22 @@ class MyPlayerSettingView @JvmOverloads constructor(
     private fun handleMainMenuClick(itemId: Int) {
         when (itemId) {
             ITEM_VIDEO_QUALITY -> showVideoQualityMenu()
-            ITEM_PLAYBACK_SPEED -> showPlaybackSpeedSubMenu()
+            ITEM_PLAYBACK_SPEED -> {
+                speedMenuEnteredFromController = false
+                showPlaybackSpeedSubMenu()
+            }
             ITEM_AFTER_PLAY -> showAfterPlayMenu()
             ITEM_SUBTITLE -> showSubtitles()
             ITEM_VIDEO_CODEC -> showVideoCodecMenu()
+            ITEM_DECODER_MODE -> {
+                // 解码方式即时切（硬解优先 ↔ 软解）：持久化与带位置重建由宿主回调完成。
+                val newValue = !panelState.softwareDecoderEnabled
+                updateState { it.copy(softwareDecoderEnabled = newValue) }
+                onPlayerSettingChange?.onSoftwareDecoderChange(newValue)
+                val label = if (newValue) context.getString(R.string.on) else context.getString(R.string.off)
+                AppToast.show(context,"${context.getString(R.string.software_video_decoder)}：$label")
+                refreshCurrentMenuInPlace()
+            }
             ITEM_AUDIO_QUALITY -> showAudioQualityMenu()
             ITEM_ASPECT_RATIO -> showScreenRatioMenu()
             ITEM_DM_SETTING -> showDmSettingMenu()
@@ -551,7 +586,7 @@ class MyPlayerSettingView @JvmOverloads constructor(
                 }
                 onPlayerSettingChange?.onScreenMirrorChange(newValue)
                 val label = if (newValue) context.getString(R.string.on) else context.getString(R.string.off)
-                Toast.makeText(context, "${context.getString(R.string.screen_mirror)}：$label", Toast.LENGTH_SHORT).show()
+                AppToast.show(context, "${context.getString(R.string.screen_mirror)}：$label")
                 refreshCurrentMenuInPlace()
             }
         }
@@ -577,7 +612,12 @@ class MyPlayerSettingView @JvmOverloads constructor(
                 updateState { it.copy(currentSpeed = selected) }
                 onPlayerSettingChange?.onPlaybackSpeedChange(selected)
                 onPlayerSettingInnerChange?.onPlaybackSpeedChange(selected)
-                goBackToMainMenu()
+                if (speedMenuEnteredFromController) {
+                    speedMenuEnteredFromController = false
+                    showHide(false)
+                } else {
+                    goBackToMainMenu()
+                }
             }
 
             adapter.currentMenuKey == ITEM_SUBTITLE && (itemId == -1 || itemId in panelState.subtitles.indices) -> {
@@ -722,7 +762,7 @@ class MyPlayerSettingView @JvmOverloads constructor(
             else -> return false
         }
         val label = if (newValue) context.getString(R.string.on) else context.getString(R.string.off)
-        Toast.makeText(context, "$title：$label", Toast.LENGTH_SHORT).show()
+        AppToast.show(context, "$title：$label")
         refreshCurrentMenuInPlace()
         return true
     }

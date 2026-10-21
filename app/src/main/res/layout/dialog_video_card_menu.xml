@@ -45,11 +45,14 @@
             android:background="@color/fourthBackgroundColor" />
     </androidx.appcompat.widget.LinearLayoutCompat>
 
-    <!-- 菜单项超过一屏时转为滚动，底部选项不再被屏幕裁掉；maxHeight 在代码里按屏高设置 -->
+    <!-- 菜单项超过一屏时转为滚动，底部选项不再被屏幕裁掉；maxHeight 在代码里按屏高设置。
+         weight=1：部分系统（如华为 Android 10 电视）窗口 WRAP_CONTENT 超限时会把尾部 child
+         直接裁掉，weight 让菜单区吃剩余空间、转为滚动，标题区优先保留 -->
     <com.mytvb.ui.widget.NonFocusableScrollView
         android:id="@+id/menu_scroll"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content">
+        android:layout_height="wrap_content"
+        android:layout_weight="1">
 
         <androidx.appcompat.widget.LinearLayoutCompat
             android:layout_width="match_parent"
@@ -384,8 +387,7 @@
                 android:layout_width="@dimen/px30"
                 android:layout_height="@dimen/px30"
                 android:layout_gravity="center"
-                app:srcCompat="@drawable/ic_block_video"
-                app:tint="@color/textColor" />
+                app:srcCompat="@drawable/ic_block_video" />
         </FrameLayout>
 
         <androidx.appcompat.widget.LinearLayoutCompat
@@ -426,6 +428,7 @@
         android:clickable="true"
         android:focusable="true"
         android:nextFocusUp="@id/button_dislike_video"
+        android:nextFocusDown="@id/button_dislike_area"
         android:gravity="center_vertical"
         android:minHeight="@dimen/px64"
         android:orientation="horizontal"
@@ -443,8 +446,7 @@
                 android:layout_width="@dimen/px30"
                 android:layout_height="@dimen/px30"
                 android:layout_gravity="center"
-                app:srcCompat="@drawable/ic_block_up"
-                app:tint="@color/textColor" />
+                app:srcCompat="@drawable/ic_block_up" />
         </FrameLayout>
 
         <androidx.appcompat.widget.LinearLayoutCompat
@@ -468,6 +470,64 @@
 
             <androidx.appcompat.widget.AppCompatTextView
                 android:id="@+id/text_dislike_up_summary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/px4"
+                android:textColor="@color/subTextColor"
+                android:textSize="@dimen/px18" />
+        </androidx.appcompat.widget.LinearLayoutCompat>
+    </androidx.appcompat.widget.LinearLayoutCompat>
+
+    <androidx.appcompat.widget.LinearLayoutCompat
+        android:id="@+id/button_dislike_area"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/px2"
+        android:background="@drawable/bg_menu_button"
+        android:clickable="true"
+        android:focusable="true"
+        android:nextFocusUp="@id/button_dislike_up"
+        android:gravity="center_vertical"
+        android:minHeight="@dimen/px64"
+        android:orientation="horizontal"
+        android:paddingStart="@dimen/px12"
+        android:paddingTop="@dimen/px6"
+        android:paddingEnd="@dimen/px12"
+        android:paddingBottom="@dimen/px6"
+        android:visibility="gone">
+
+        <FrameLayout
+            android:layout_width="@dimen/px52"
+            android:layout_height="@dimen/px52"
+            android:background="@drawable/dialog_menu_icon_background">
+
+            <androidx.appcompat.widget.AppCompatImageView
+                android:layout_width="@dimen/px30"
+                android:layout_height="@dimen/px30"
+                android:layout_gravity="center"
+                app:srcCompat="@drawable/ic_block_area" />
+        </FrameLayout>
+
+        <androidx.appcompat.widget.LinearLayoutCompat
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="@dimen/px12"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <androidx.appcompat.widget.AppCompatTextView
+                android:id="@+id/text_dislike_area_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:singleLine="true"
+                android:textColor="@color/textColor"
+                android:textSize="@dimen/px26"
+                android:textStyle="bold" />
+
+            <androidx.appcompat.widget.AppCompatTextView
+                android:id="@+id/text_dislike_area_summary"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="@dimen/px4"

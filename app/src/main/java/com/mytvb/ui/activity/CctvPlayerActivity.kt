@@ -26,7 +26,8 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
-import android.widget.Toast
+
+import androidx.activity.OnBackPressedCallback
 import com.mytvb.core.ui.base.ChoiceDialog
 import androidx.lifecycle.lifecycleScope
 import com.mytvb.R
@@ -36,6 +37,8 @@ import com.mytvb.core.ui.base.BaseActivity
 import com.mytvb.core.ui.system.ViewUtils
 import com.mytvb.feature.cctv.CctvChannel
 import com.mytvb.feature.cctv.CctvChannels
+import com.mytvb.feature.cctv.CctvLiveQuality
+import com.mytvb.feature.cctv.CctvLiveQualityHook
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -43,6 +46,7 @@ import kotlin.math.abs
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.koin.android.ext.android.inject
+import com.mytvb.core.ui.base.AppToast
 
 class CctvPlayerActivity : BaseActivity<ActivityCctvPlayerBinding>() {
 
@@ -59,10 +63,11 @@ class CctvPlayerActivity : BaseActivity<ActivityCctvPlayerBinding>() {
     private var playbackTimeoutSession = -1
     private var probeExtends = 0
     private var playbackStartMs = 0L
-    private var preferredQuality = CctvQuality.P1080
-    private var selectedQuality = CctvQuality.P1080
+    private var preferredQuality = CctvLiveQuality.P1080
+    private var selectedQuality = CctvLiveQuality.P1080
     private var customView: View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
+    /** 播放UI隐藏时连按两次 BACK 退出的计时锚点：上一次 BACK 的时间戳，0 表示连击未开始。 */
     private var exitTime = 0L
     /** 按钮的 OK 已在 DOWN 消费，对应 UP 直接吞掉（防误触 performClick）。 */
     private var consumeNextOkUp = false
@@ -73,6 +78,10 @@ class CctvPlayerActivity : BaseActivity<ActivityCctvPlayerBinding>() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // BACK 兜底：统一走 dispatcher callback（与普通视频播放器/直播页同构）
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() = handleBackKey()
+        })
         currentIndex = CctvChannels.defaultIndex(intent.getIntExtra(EXTRA_CHANNEL_INDEX, 0))
         gestureDetector = GestureDetector(this, PlayerGestureListener())
         binding.playerRoot.requestFocus()
@@ -85,7 +94,8 @@ class CctvPlayerActivity : BaseActivity<ActivityCctvPlayerBinding>() {
         binding.controller.visibility = View.VISIBLE
         binding.buttonBack.touchPressFeedback = true
         binding.buttonBack.setOnClickListener {
-            // 与普通视频播放器 button_back 一致：单击直接退出播放器
+            // 返回按钮 = 单击退出直播（对齐普通视频播放器 button_back → onClose → 退出播放页）；
+            // 遥控 BACK 键另走 handleBackKey 三层优先级（浮层 > 播放UI > 双击退出）
             finish()
         }
         binding.buttonRefresh.setOnClickListener {
@@ -262,12 +272,12 @@ class CctvPlayerActivity : BaseActivity<ActivityCctvPlayerBinding>() {
         val baseUrl = "https://tv.cctv.com/live/${channel.id}/m/"
         AppLog.i(
             TAG,
-            "webLoad ${channel.title} channelId=${channel.id} quality=${selectedQuality.label} br=${selectedQuality.br} baseUrl=$baseUrl scripts=$scriptSource count=${scriptUrls.size}"
+            "webLoad ${channel.title} channelId=${channel.id} quality=${selectedQuality.label} b=${selectedQuality.bRange} baseUrl=$baseUrl scripts=$scriptSource count=${scriptUrls.size}"
         )
         logPlaybackStage(
             session,
             "load_html",
-            "quality=${selectedQuality.label} br=${selectedQuality.br} scripts=$scriptSource count=${scriptUrls.size}"
+            "quality=${selectedQuality.label} b=${selectedQuality.bRange} scripts=$scriptSource count=${scriptUrls.size}"
         )
         binding.webPlayer.loadDataWithBaseURL(baseUrl, html, "text/html", "UTF-8", null)
         schedulePlaybackTimeout(session)
@@ -285,7 +295,7 @@ class CctvPlayerActivity : BaseActivity<ActivityCctvPlayerBinding>() {
 
     private fun showQualityDialog() {
         showController()
-        val qualities = CctvQuality.values()
+        val qualities = CctvLiveQuality.entries
         val labels = qualities.map { it.label }
         val checkedIndex = qualities.indexOf(preferredQuality).coerceAtLeast(0)
         ChoiceDialog.show(
@@ -344,6 +354,8 @@ class CctvPlayerActivity : BaseActivity<ActivityCctvPlayerBinding>() {
         handler.removeCallbacks(hideControllerRunnable)
         binding.controller.visibility = View.GONE
         binding.topBar.visibility = View.GONE
+        // 收起播放UI即打断退出连击：避免「关UI」那一下被算作双击退出的第一下
+        exitTime = 0L
         // 收起后焦点回到播放区，避免落在已隐藏的按钮上
         if (!binding.playerRoot.isFocused) {
             binding.playerRoot.requestFocus()
@@ -399,7 +411,7 @@ class CctvPlayerActivity : BaseActivity<ActivityCctvPlayerBinding>() {
     }
 
     private fun initialPlaybackTimeoutMs(): Long =
-        if (selectedQuality == CctvQuality.P1080) PLAYBACK_TIMEOUT_1080_MS else PLAYBACK_TIMEOUT_MS
+        if (selectedQuality == CctvLiveQuality.P1080) PLAYBACK_TIMEOUT_1080_MS else PLAYBACK_TIMEOUT_MS
 
     private fun probePlaybackBuffer(session: Int) {
         binding.webPlayer.evaluateJavascript(BUFFER_PROBE_SCRIPT) { result ->
@@ -458,8 +470,8 @@ class CctvPlayerActivity : BaseActivity<ActivityCctvPlayerBinding>() {
             DEFAULT_SCRIPT_URLS
         }
         val scriptSource = if (usingDynamicScripts) "quality-fallback-official" else "quality-fallback"
-        AppLog.w(TAG, "qualityFallback reason=$reason next=${nextQuality.label} br=${nextQuality.br}")
-        logPlaybackStage(session, "quality_fallback", "reason=$reason next=${nextQuality.label} br=${nextQuality.br}")
+        AppLog.w(TAG, "qualityFallback reason=$reason next=${nextQuality.label} b=${nextQuality.bRange}")
+        logPlaybackStage(session, "quality_fallback", "reason=$reason next=${nextQuality.label} b=${nextQuality.bRange}")
         loadChannelHtml(channel, scriptUrls, session, scriptSource)
         return true
     }
@@ -697,19 +709,31 @@ class CctvPlayerActivity : BaseActivity<ActivityCctvPlayerBinding>() {
     private fun isControllerButtonFocused(): Boolean =
         binding.buttonQuality.isFocused || binding.buttonRefresh.isFocused
 
-    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
-    override fun onBackPressed() {
-        if (binding.controller.visibility == View.VISIBLE || binding.textError.visibility == View.VISIBLE) {
+    /**
+     * BACK 统一处理，优先级：错误提示直退 > 播放UI收起 > 双击退出。
+     *
+     * 由 [onBackPressedDispatcher] 的 callback 调用（与普通视频播放器/直播页同构）。
+     * 不能 override onBackPressed：Android 13+ 的 BACK 走 OnBackInvoked →
+     * dispatcher → 默认 fallback（静态绑定 Activity.onBackPressed），会绕过 override。
+     */
+    private fun handleBackKey() {
+        // 错误提示展示中：直接退出，不再走连击
+        if (binding.textError.visibility == View.VISIBLE) {
             finish()
             return
         }
+        // 播放UI显示：先收起播放UI（频道菜单/画质弹窗由 Dialog 自身消费 BACK 关闭，不会走到这里）
+        if (binding.controller.visibility == View.VISIBLE) {
+            hideController()
+            return
+        }
+        // 播放UI隐藏：快速连按两次 BACK 才退出
         val now = System.currentTimeMillis()
         if (now - exitTime <= EXIT_INTERVAL_MS) {
             finish()
         } else {
             exitTime = now
-            Toast.makeText(applicationContext, R.string.activity_exit_player_hint, Toast.LENGTH_SHORT).show()
-            showController()
+            AppToast.show(applicationContext, R.string.activity_exit_player_hint)
         }
     }
 
@@ -750,7 +774,8 @@ class CctvPlayerActivity : BaseActivity<ActivityCctvPlayerBinding>() {
                     return@post
                 }
                 handler.removeCallbacks(playbackTimeoutRunnable)
-                logPlaybackStage(playbackSession, "video_playable", state.take(160))
+                // take(400)：src 是 JSON 末尾字段且 URL 较长，截太短会把流地址切掉
+                logPlaybackStage(playbackSession, "video_playable", state.take(400))
                 binding.progressBar.visibility = View.GONE
                 binding.textError.visibility = View.GONE
             }
@@ -817,6 +842,7 @@ $scriptTags
             <body>
               <div id="player"></div>
               <script>
+                ${CctvLiveQualityHook.script(selectedQuality.bRange)}
                 (function() {
                   var channel = '$safeId';
                   function size() {
@@ -869,7 +895,7 @@ $scriptTags
                       t: channel,
                       isAutoPlay: 'true',
                       ruleVisible: 'false',
-                      br: '${selectedQuality.br.escapeJsString()}',
+                      br: '',
                       posterImg: '',
                       isLive4k: 'false',
                       isHttps: 'true',
@@ -881,7 +907,7 @@ $scriptTags
                       jumpToApp: 'false',
                       others: ''
                     };
-                    console.log('mybili cctv createLivePlayer ' + channel + ' ' + s.w + 'x' + s.h);
+                    console.log('mybili cctv createLivePlayer ' + channel + ' ' + s.w + 'x' + s.h + ' target=${selectedQuality.label}');
                     createLivePlayer(playerParas);
                     setInterval(fitAndPlay, 1000);
                     setTimeout(fitAndPlay, 300);
@@ -899,10 +925,6 @@ $scriptTags
 
     private fun String.escapeHtmlAttribute(): String {
         return replace("&", "&amp;").replace("\"", "&quot;")
-    }
-
-    private fun String.escapeJsString(): String {
-        return replace("\\", "\\\\").replace("'", "\\'")
     }
 
     private fun logPlaybackStage(session: Int, stage: String, detail: String = "") {
@@ -1040,20 +1062,5 @@ $scriptTags
                 }
             })();
         """.trimIndent()
-    }
-
-    private enum class CctvQuality(
-        val label: String,
-        val br: String
-    ) {
-        P1080("1080P", "1080"),
-        P720("720P", "720"),
-        P540("540P", "540"),
-        P360("360P", "360");
-
-        fun nextLower(): CctvQuality? {
-            val qualities = values()
-            return qualities.getOrNull(qualities.indexOf(this) + 1)
-        }
     }
 }
